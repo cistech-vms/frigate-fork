@@ -15,7 +15,6 @@ import uvicorn
 from peewee_migrate import Router
 from playhouse.sqlite_ext import SqliteExtDatabase
 
-from frigate.api.auth import hash_password
 from frigate.api.fastapi_app import create_fastapi_app
 from frigate.camera import CameraMetrics, PTZMetrics
 from frigate.camera.maintainer import CameraMaintainer
@@ -70,6 +69,7 @@ from frigate.review.review import ReviewProcess
 from frigate.stats.emitter import StatsEmitter
 from frigate.stats.util import stats_init
 from frigate.storage import StorageMaintainer
+from frigate.security import hash_password
 from frigate.timeline import TimelineProcessor
 from frigate.track.object_processing import TrackedObjectProcessor
 from frigate.headless.settings import get_headless_settings
