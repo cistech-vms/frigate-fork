@@ -16,7 +16,7 @@ Nesta fase eu documento o contrato funcional para o CMS controlar configuracoes 
 flowchart LR
     A[CMS Control Plane] -->|/v1/config/validate| B[Frigate API Headless]
     A -->|/v1/config/apply| B
-    A -->|/v1/cameras/{camera_id}/regions/upsert| B
+    A -->|/v1/cameras/:camera_id/regions/upsert| B
     A -->|/v1/triggers/upsert| B
     B --> C[Runtime Config Store]
     C --> D[Detector/Tracker Pipeline]
