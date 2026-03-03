@@ -283,6 +283,16 @@ def stats_snapshot(
             "process_fps": round(camera_stats.process_fps.value, 2),
             "skipped_fps": round(camera_stats.skipped_fps.value, 2),
             "detection_fps": round(camera_stats.detection_fps.value, 2),
+            "adaptive_overload": int(camera_stats.adaptive_overload.value),
+            "adaptive_skip_frames": int(camera_stats.adaptive_skip_frames.value),
+            "adaptive_inference_latency_ms": round(
+                camera_stats.adaptive_inference_latency_ms.value, 2
+            ),
+            "roi_profile_active": int(camera_stats.roi_profile_active.value),
+            "roi_profile_version": int(camera_stats.roi_profile_version.value),
+            "routing_high_priority": int(camera_stats.routing_high_priority.value),
+            "routing_quota_drops": int(camera_stats.routing_quota_drops.value),
+            "routing_affinity_active": int(camera_stats.routing_affinity_active.value),
             "detection_enabled": config.cameras[name].detect.enabled,
             "pid": pid,
             "capture_pid": capture_pid,

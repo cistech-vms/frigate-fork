@@ -68,6 +68,157 @@ class TestConfig(unittest.TestCase):
         assert frigate_config.detectors["cpu"].type == DetectorTypeEnum.cpu
         assert frigate_config.detectors["cpu"].model.width == 320
 
+    def test_adaptive_load_shedding_config(self):
+        config = deep_merge(
+            {
+                "cameras": {
+                    "back": {
+                        "detect": {
+                            "adaptive_load_shedding": {
+                                "enabled": True,
+                                "queue_high_watermark": 2,
+                                "queue_recovery_watermark": 1,
+                                "inference_latency_high_ms": 180,
+                                "inference_latency_recovery_ms": 120,
+                                "min_skip_frames": 1,
+                                "max_skip_frames": 3,
+                                "critical_labels": ["person", "car"],
+                            }
+                        }
+                    }
+                }
+            },
+            self.minimal,
+        )
+        frigate_config = FrigateConfig(**config)
+        adaptive = frigate_config.cameras["back"].detect.adaptive_load_shedding
+        assert adaptive.enabled
+        assert adaptive.max_skip_frames == 3
+        assert "person" in adaptive.critical_labels
+
+    def test_invalid_adaptive_load_shedding_thresholds(self):
+        config = deep_merge(
+            {
+                "cameras": {
+                    "back": {
+                        "detect": {
+                            "adaptive_load_shedding": {
+                                "enabled": True,
+                                "queue_high_watermark": 1,
+                                "queue_recovery_watermark": 2,
+                            }
+                        }
+                    }
+                }
+            },
+            self.minimal,
+        )
+
+        self.assertRaises(ValidationError, lambda: FrigateConfig(**config))
+
+    def test_roi_scheduling_profile_config(self):
+        config = deep_merge(
+            {
+                "cameras": {
+                    "back": {
+                        "detect": {
+                            "roi_scheduling": {
+                                "enabled": True,
+                                "profiles": [
+                                    {
+                                        "name": "night-noise-control",
+                                        "version": 3,
+                                        "days_of_week": [0, 1, 2, 3, 4],
+                                        "start_time": "21:00",
+                                        "end_time": "05:30",
+                                        "region_size_multiplier": 0.9,
+                                        "dynamic_masks": [
+                                            {"coordinates": "0.0,0.0,0.4,0.0,0.4,0.4,0.0,0.4"}
+                                        ],
+                                        "zone_modes": {"back_yard": "crossing"},
+                                    }
+                                ],
+                            }
+                        },
+                        "zones": {"back_yard": {"coordinates": "0.1,0.1,0.2,0.1,0.2,0.2"}},
+                    }
+                }
+            },
+            self.minimal,
+        )
+        frigate_config = FrigateConfig(**config)
+        profile = frigate_config.cameras["back"].detect.roi_scheduling.profiles[0]
+        assert profile.name == "night-noise-control"
+        assert profile.version == 3
+        assert profile.zone_modes["back_yard"].value == "crossing"
+
+    def test_invalid_roi_scheduling_time_format(self):
+        config = deep_merge(
+            {
+                "cameras": {
+                    "back": {
+                        "detect": {
+                            "roi_scheduling": {
+                                "enabled": True,
+                                "profiles": [
+                                    {
+                                        "name": "invalid-time",
+                                        "start_time": "25:00",
+                                        "end_time": "06:00",
+                                    }
+                                ],
+                            }
+                        }
+                    }
+                }
+            },
+            self.minimal,
+        )
+        self.assertRaises(ValidationError, lambda: FrigateConfig(**config))
+
+    def test_priority_routing_config(self):
+        config = deep_merge(
+            {
+                "cameras": {
+                    "back": {
+                        "detect": {
+                            "priority_routing": {
+                                "enabled": True,
+                                "high_priority": True,
+                                "tenant_key": "tenant-a",
+                                "worker_affinity_key": "gpu-a",
+                                "max_normal_queue_depth": 20,
+                            }
+                        }
+                    }
+                }
+            },
+            self.minimal,
+        )
+        frigate_config = FrigateConfig(**config)
+        routing = frigate_config.cameras["back"].detect.priority_routing
+        assert routing.enabled
+        assert routing.high_priority
+        assert routing.tenant_key == "tenant-a"
+        assert routing.worker_affinity_key == "gpu-a"
+
+    def test_detector_affinity_and_lane_config(self):
+        config = deep_merge(
+            {
+                "detectors": {
+                    "cpu": {
+                        "type": "cpu",
+                        "priority_lane": "high",
+                        "camera_affinity_keys": ["gpu-a"],
+                    }
+                }
+            },
+            self.minimal,
+        )
+        frigate_config = FrigateConfig(**config)
+        assert frigate_config.detectors["cpu"].priority_lane == "high"
+        assert frigate_config.detectors["cpu"].camera_affinity_keys == ["gpu-a"]
+
     @patch("frigate.detectors.detector_config.load_labels")
     def test_detector_custom_model_path(self, mock_labels):
         mock_labels.return_value = {}

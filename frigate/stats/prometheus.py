@@ -106,6 +106,46 @@ class CustomCollector(object):
             "Frames per second skip for processing by frigate.",
             labels=["camera_name"],
         )
+        adaptive_overload = GaugeMetricFamily(
+            "frigate_adaptive_overload",
+            "Adaptive saturation mode state (1=saturated, 0=normal).",
+            labels=["camera_name"],
+        )
+        adaptive_skip_frames = GaugeMetricFamily(
+            "frigate_adaptive_skip_frames",
+            "Number of skipped frames between processed frames in adaptive mode.",
+            labels=["camera_name"],
+        )
+        adaptive_inference_latency_ms = GaugeMetricFamily(
+            "frigate_adaptive_inference_latency_ms",
+            "Adaptive inferred per-frame inference latency in milliseconds.",
+            labels=["camera_name"],
+        )
+        roi_profile_active = GaugeMetricFamily(
+            "frigate_roi_profile_active",
+            "ROI profile activity state (1=active, 0=inactive).",
+            labels=["camera_name"],
+        )
+        roi_profile_version = GaugeMetricFamily(
+            "frigate_roi_profile_version",
+            "Current active ROI profile version number.",
+            labels=["camera_name"],
+        )
+        routing_high_priority = GaugeMetricFamily(
+            "frigate_routing_high_priority",
+            "Camera is routed to high-priority queue (1=yes,0=no).",
+            labels=["camera_name"],
+        )
+        routing_quota_drops = GaugeMetricFamily(
+            "frigate_routing_quota_drops_total",
+            "Dropped low-priority inference requests due to quota limits.",
+            labels=["camera_name"],
+        )
+        routing_affinity_active = GaugeMetricFamily(
+            "frigate_routing_affinity_active",
+            "Camera has worker affinity key configured (1=yes,0=no).",
+            labels=["camera_name"],
+        )
 
         # read camera stats assuming version < frigate:0.13.0-beta3
         cameras = stats
@@ -125,6 +165,45 @@ class CustomCollector(object):
             self.add_metric(detection_fps, [camera_name], camera_stats, "detection_fps")
             self.add_metric(process_fps, [camera_name], camera_stats, "process_fps")
             self.add_metric(skipped_fps, [camera_name], camera_stats, "skipped_fps")
+            self.add_metric(
+                adaptive_overload, [camera_name], camera_stats, "adaptive_overload"
+            )
+            self.add_metric(
+                adaptive_skip_frames,
+                [camera_name],
+                camera_stats,
+                "adaptive_skip_frames",
+            )
+            self.add_metric(
+                adaptive_inference_latency_ms,
+                [camera_name],
+                camera_stats,
+                "adaptive_inference_latency_ms",
+            )
+            self.add_metric(
+                roi_profile_active, [camera_name], camera_stats, "roi_profile_active"
+            )
+            self.add_metric(
+                roi_profile_version, [camera_name], camera_stats, "roi_profile_version"
+            )
+            self.add_metric(
+                routing_high_priority,
+                [camera_name],
+                camera_stats,
+                "routing_high_priority",
+            )
+            self.add_metric(
+                routing_quota_drops,
+                [camera_name],
+                camera_stats,
+                "routing_quota_drops",
+            )
+            self.add_metric(
+                routing_affinity_active,
+                [camera_name],
+                camera_stats,
+                "routing_affinity_active",
+            )
 
             self.add_metric_process(
                 cpu_usages_metric,
@@ -195,6 +274,14 @@ class CustomCollector(object):
         yield detection_fps
         yield process_fps
         yield skipped_fps
+        yield adaptive_overload
+        yield adaptive_skip_frames
+        yield adaptive_inference_latency_ms
+        yield roi_profile_active
+        yield roi_profile_version
+        yield routing_high_priority
+        yield routing_quota_drops
+        yield routing_affinity_active
 
         # bandwidth stats
         bandwidth_usages = GaugeMetricFamily(

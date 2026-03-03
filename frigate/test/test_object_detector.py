@@ -9,6 +9,7 @@ import frigate.object_detection.base
 from frigate.config import DetectorConfig, ModelConfig
 from frigate.detectors import DetectorTypeEnum
 from frigate.detectors.detector_config import InputTensorEnum
+from frigate.object_detection.base import _parse_detection_request
 
 
 class TestLocalObjectDetector(unittest.TestCase):
@@ -136,3 +137,26 @@ class TestLocalObjectDetector(unittest.TestCase):
             == np.zeros((1, 32, 32, 3)).shape
         )
         assert test_result == TEST_DETECT_RESULT
+
+
+class TestDetectionRequestParsing(unittest.TestCase):
+    def test_parse_legacy_string_request(self):
+        camera, priority, tenant, affinity = _parse_detection_request("cam01")
+        assert camera == "cam01"
+        assert priority == "normal"
+        assert tenant == "default"
+        assert affinity is None
+
+    def test_parse_enriched_request(self):
+        camera, priority, tenant, affinity = _parse_detection_request(
+            {
+                "camera": "cam02",
+                "priority": "high",
+                "tenant": "tenant-a",
+                "affinity": "gpu-a",
+            }
+        )
+        assert camera == "cam02"
+        assert priority == "high"
+        assert tenant == "tenant-a"
+        assert affinity == "gpu-a"

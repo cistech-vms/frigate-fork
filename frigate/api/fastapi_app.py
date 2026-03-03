@@ -16,6 +16,8 @@ from frigate.config import FrigateConfig
 from frigate.config.camera.updater import CameraConfigUpdatePublisher
 from frigate.embeddings import EmbeddingsContext
 from frigate.headless.runtime_config import init_runtime_store
+from frigate.headless.closed_loop import init_closed_loop_state
+from frigate.headless.governance import init_governance_state
 from frigate.headless.security import SimpleRateLimiter
 from frigate.headless.settings import get_headless_settings
 from frigate.ptz.onvif import OnvifController
@@ -112,6 +114,10 @@ def create_fastapi_app(
     )
     app.state.headless_triggers = {}
     app.state.headless_regions = {}
+    app.state.headless_noise_suggestions = {}
+    app.state.headless_noise_audit = []
+    app.state.headless_closed_loop = init_closed_loop_state()
+    app.state.headless_governance = init_governance_state()
     app.state.headless_started_at = time.time()
     app.state.sse_client = sse_client
 

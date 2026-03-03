@@ -9,6 +9,7 @@ from multiprocessing.synchronize import Event as MpEvent
 from typing import Any
 
 import cv2
+import numpy as np
 
 from frigate.camera import CameraMetrics, PTZMetrics
 from frigate.comms.inter_process import InterProcessRequestor
@@ -56,6 +57,234 @@ from frigate.util.process import FrigateProcess
 from frigate.util.time import get_tomorrow_at_time
 
 logger = logging.getLogger(__name__)
+
+
+class AdaptiveLoadController:
+    """Controls adaptive frame skipping and recovery based on queue/latency pressure."""
+
+    def __init__(self, camera_config: CameraConfig):
+        self.camera_name = camera_config.name
+        self.settings = camera_config.detect.adaptive_load_shedding
+        self.skip_frames = self.settings.min_skip_frames
+        self.overloaded = False
+        self.stable_cycles = 0
+        self._processed_counter = 0
+        self._last_logged_skip = self.skip_frames
+
+    def update(self, queue_depth: int | None, inference_latency_ms: float) -> None:
+        if not self.settings.enabled:
+            self.skip_frames = 0
+            self.overloaded = False
+            self.stable_cycles = 0
+            return
+
+        overload_by_queue = (
+            queue_depth is not None and queue_depth >= self.settings.queue_high_watermark
+        )
+        overload_by_latency = (
+            inference_latency_ms >= self.settings.inference_latency_high_ms
+        )
+        overloaded_now = overload_by_queue or overload_by_latency
+
+        if overloaded_now:
+            self.stable_cycles = 0
+            if not self.overloaded:
+                logger.warning(
+                    "%s: entering adaptive saturation mode (queue_depth=%s, inference_latency_ms=%.2f)",
+                    self.camera_name,
+                    queue_depth if queue_depth is not None else "n/a",
+                    inference_latency_ms,
+                )
+            self.overloaded = True
+            if self.skip_frames < self.settings.max_skip_frames:
+                self.skip_frames += 1
+        else:
+            recovered_queue = queue_depth is None or (
+                queue_depth <= self.settings.queue_recovery_watermark
+            )
+            recovered_latency = (
+                inference_latency_ms <= self.settings.inference_latency_recovery_ms
+            )
+
+            if self.overloaded and recovered_queue and recovered_latency:
+                self.stable_cycles += 1
+                if self.stable_cycles >= self.settings.recovery_stable_cycles:
+                    self.stable_cycles = 0
+                    if self.skip_frames > self.settings.min_skip_frames:
+                        self.skip_frames -= 1
+                    else:
+                        self.overloaded = False
+                        logger.info(
+                            "%s: exiting adaptive saturation mode (queue_depth=%s, inference_latency_ms=%.2f)",
+                            self.camera_name,
+                            queue_depth if queue_depth is not None else "n/a",
+                            inference_latency_ms,
+                        )
+            elif self.overloaded:
+                self.stable_cycles = 0
+
+        if self._last_logged_skip != self.skip_frames:
+            logger.info(
+                "%s: adaptive skip updated to %d frame(s)",
+                self.camera_name,
+                self.skip_frames,
+            )
+            self._last_logged_skip = self.skip_frames
+
+    def should_skip_current_frame(self) -> bool:
+        if not self.settings.enabled or self.skip_frames <= 0:
+            self._processed_counter = 0
+            return False
+
+        if self._processed_counter < self.skip_frames:
+            self._processed_counter += 1
+            return True
+
+        self._processed_counter = 0
+        return False
+
+
+def get_queue_depth(q: Queue) -> int | None:
+    try:
+        return q.qsize()
+    except (NotImplementedError, AttributeError):
+        return None
+
+
+class RoiScheduleController:
+    """Applies scheduled ROI profiles (masking, region scaling, zone mode overrides)."""
+
+    def __init__(self, camera_config: CameraConfig):
+        self.camera_name = camera_config.name
+        self.camera_config = camera_config
+        self.settings = camera_config.detect.roi_scheduling
+        self.base_zone_modes = {
+            zone_name: zone.mode for zone_name, zone in camera_config.zones.items()
+        }
+        self.active_profile = None
+        self.active_profile_name: str | None = None
+        self.active_version = 0
+
+    def _is_time_in_range(self, now_hhmm: str, start_time: str, end_time: str) -> bool:
+        if start_time <= end_time:
+            return start_time <= now_hhmm <= end_time
+        # overnight range (e.g., 22:00-05:00)
+        return now_hhmm >= start_time or now_hhmm <= end_time
+
+    def get_active_profile(self):
+        if not self.settings.enabled:
+            return None
+
+        now_local = datetime.now().astimezone()
+        weekday = now_local.weekday()
+        now_hhmm = now_local.strftime("%H:%M")
+
+        for profile in self.settings.profiles:
+            if not profile.enabled:
+                continue
+            if weekday not in profile.days_of_week:
+                continue
+            if self._is_time_in_range(now_hhmm, profile.start_time, profile.end_time):
+                return profile
+        return None
+
+    def _restore_default_zone_modes(self) -> None:
+        for zone_name, mode in self.base_zone_modes.items():
+            if zone_name in self.camera_config.zones:
+                self.camera_config.zones[zone_name].mode = mode
+
+    def _apply_zone_modes(self, profile) -> None:
+        self._restore_default_zone_modes()
+        for zone_name, mode in profile.zone_modes.items():
+            if zone_name in self.camera_config.zones:
+                self.camera_config.zones[zone_name].mode = mode
+
+    def _build_mask_contour(
+        self, coordinates: str, frame_shape: tuple[int, int]
+    ) -> list[tuple[int, int]]:
+        points = coordinates.split(",")
+        if len(points) < 6 or len(points) % 2 != 0:
+            return []
+
+        try:
+            raw_points = [float(p) for p in points]
+        except ValueError:
+            return []
+
+        explicit = any(p > 1.0 for p in raw_points)
+        contour: list[tuple[int, int]] = []
+        for i in range(0, len(raw_points), 2):
+            x = int(raw_points[i] if explicit else raw_points[i] * frame_shape[1])
+            y = int(raw_points[i + 1] if explicit else raw_points[i + 1] * frame_shape[0])
+            contour.append((x, y))
+        return contour
+
+    def _is_region_masked(
+        self, region: tuple[int, int, int, int], frame_shape: tuple[int, int], profile
+    ) -> bool:
+        if not profile.dynamic_masks:
+            return False
+
+        center = ((region[0] + region[2]) // 2, (region[1] + region[3]) // 2)
+        for mask in profile.dynamic_masks:
+            contour = self._build_mask_contour(mask.coordinates, frame_shape)
+            if contour and cv2.pointPolygonTest(
+                np.array(contour, dtype="int32"), center, False
+            ) >= 0:
+                return True
+        return False
+
+    def _scale_region(
+        self, region: tuple[int, int, int, int], frame_shape: tuple[int, int], scale: float
+    ) -> tuple[int, int, int, int]:
+        if scale == 1.0:
+            return region
+        cx = (region[0] + region[2]) / 2
+        cy = (region[1] + region[3]) / 2
+        width = max(2.0, (region[2] - region[0]) * scale)
+        height = max(2.0, (region[3] - region[1]) * scale)
+        half_w = width / 2
+        half_h = height / 2
+        return (
+            int(max(0, cx - half_w)),
+            int(max(0, cy - half_h)),
+            int(min(frame_shape[1] - 1, cx + half_w)),
+            int(min(frame_shape[0] - 1, cy + half_h)),
+        )
+
+    def apply(self, regions: list[tuple[int, int, int, int]], frame_shape: tuple[int, int]):
+        profile = self.get_active_profile()
+
+        if profile is None:
+            if self.active_profile_name is not None:
+                logger.info("%s: ROI schedule disabled, restoring default zone modes", self.camera_name)
+            self.active_profile = None
+            self.active_profile_name = None
+            self.active_version = 0
+            self._restore_default_zone_modes()
+            return regions
+
+        if self.active_profile_name != profile.name or self.active_version != profile.version:
+            logger.info(
+                "%s: applying ROI profile '%s' (version=%d)",
+                self.camera_name,
+                profile.name,
+                profile.version,
+            )
+            self.active_profile_name = profile.name
+            self.active_version = profile.version
+            self._apply_zone_modes(profile)
+
+        filtered: list[tuple[int, int, int, int]] = []
+        for region in regions:
+            if self._is_region_masked(region, frame_shape, profile):
+                continue
+            filtered.append(
+                self._scale_region(region, frame_shape, profile.region_size_multiplier)
+            )
+
+        self.active_profile = profile
+        return filtered
 
 
 def stop_ffmpeg(ffmpeg_process: sp.Popen[Any], logger: logging.Logger):
@@ -609,6 +838,7 @@ class CameraTracker(FrigateProcess):
         model_config: ModelConfig,
         labelmap: dict[int, str],
         detection_queue: Queue,
+        detection_queue_priority: Queue,
         detected_objects_queue,
         camera_metrics: CameraMetrics,
         ptz_metrics: PTZMetrics,
@@ -626,6 +856,7 @@ class CameraTracker(FrigateProcess):
         self.model_config = model_config
         self.labelmap = labelmap
         self.detection_queue = detection_queue
+        self.detection_queue_priority = detection_queue_priority
         self.detected_objects_queue = detected_objects_queue
         self.camera_metrics = camera_metrics
         self.ptz_metrics = ptz_metrics
@@ -648,8 +879,11 @@ class CameraTracker(FrigateProcess):
             self.config.name,
             self.labelmap,
             self.detection_queue,
+            self.detection_queue_priority,
             self.model_config,
             self.stop_event,
+            priority_routing=self.config.detect.priority_routing,
+            camera_metrics=self.camera_metrics,
         )
 
         object_tracker = NorfairTracker(self.config, self.ptz_metrics)
@@ -753,6 +987,9 @@ def process_frames(
 
     fps_tracker = EventsPerSecond()
     fps_tracker.start()
+    adaptive_controller = AdaptiveLoadController(camera_config)
+    roi_controller = RoiScheduleController(camera_config)
+    inference_latency_ms_ema = 0.0
 
     startup_scan = True
     stationary_frame_counter = 0
@@ -819,6 +1056,13 @@ def process_frames(
                 tracker.tracked_objects = []
 
         if not camera_enabled:
+            camera_metrics.adaptive_overload.value = 0
+            camera_metrics.adaptive_skip_frames.value = 0
+            camera_metrics.adaptive_inference_latency_ms.value = 0
+            camera_metrics.roi_profile_active.value = 0
+            camera_metrics.roi_profile_version.value = 0
+            camera_metrics.routing_high_priority.value = 0
+            camera_metrics.routing_affinity_active.value = 0
             time.sleep(0.1)
             continue
 
@@ -853,139 +1097,198 @@ def process_frames(
 
         regions = []
         consolidated_detections = []
+        adaptive_settings = camera_config.detect.adaptive_load_shedding
+        critical_labels_set = set(adaptive_settings.critical_labels)
 
         # if detection is disabled
         if not camera_config.detect.enabled:
             object_tracker.match_and_update(frame_name, frame_time, [])
+            camera_metrics.adaptive_overload.value = 0
+            camera_metrics.adaptive_skip_frames.value = 0
+            camera_metrics.adaptive_inference_latency_ms.value = 0
+            camera_metrics.roi_profile_active.value = 0
+            camera_metrics.roi_profile_version.value = 0
+            camera_metrics.routing_high_priority.value = 0
+            camera_metrics.routing_affinity_active.value = 0
         else:
+            active_objects_to_track = camera_config.objects.track
+            active_object_filters = camera_config.objects.filters
+
+            if adaptive_controller.overloaded and critical_labels_set:
+                prioritized_labels = [
+                    label
+                    for label in camera_config.objects.track
+                    if label in critical_labels_set
+                ]
+                if prioritized_labels:
+                    active_objects_to_track = prioritized_labels
+                    active_object_filters = {
+                        label: camera_config.objects.filters[label]
+                        for label in prioritized_labels
+                        if label in camera_config.objects.filters
+                    }
+
+            if adaptive_controller.should_skip_current_frame():
+                object_tracker.update_frame_times(frame_name, frame_time)
+                queue_depth = get_queue_depth(frame_queue)
+                adaptive_controller.update(queue_depth, inference_latency_ms_ema)
+                camera_metrics.adaptive_overload.value = int(adaptive_controller.overloaded)
+                camera_metrics.adaptive_skip_frames.value = adaptive_controller.skip_frames
+                camera_metrics.adaptive_inference_latency_ms.value = (
+                    inference_latency_ms_ema
+                )
+            else:
+                infer_start = time.perf_counter()
             # get stationary object ids
             # check every Nth frame for stationary objects
             # disappeared objects are not stationary
             # also check for overlapping motion boxes
-            if stationary_frame_counter == camera_config.detect.stationary.interval:
-                stationary_frame_counter = 0
-                stationary_object_ids = []
-            else:
-                stationary_frame_counter += 1
-                stationary_object_ids = [
-                    obj["id"]
+                if stationary_frame_counter == camera_config.detect.stationary.interval:
+                    stationary_frame_counter = 0
+                    stationary_object_ids = []
+                else:
+                    stationary_frame_counter += 1
+                    stationary_object_ids = [
+                        obj["id"]
+                        for obj in object_tracker.tracked_objects.values()
+                        # if it has exceeded the stationary threshold
+                        if obj["motionless_count"]
+                        >= camera_config.detect.stationary.threshold
+                        # and it hasn't disappeared
+                        and object_tracker.disappeared[obj["id"]] == 0
+                        # and it doesn't overlap with any current motion boxes when not calibrating
+                        and not intersects_any(
+                            obj["box"],
+                            [] if motion_detector.is_calibrating() else motion_boxes,
+                        )
+                    ]
+
+                # get tracked object boxes that aren't stationary
+                tracked_object_boxes = [
+                    (
+                        # use existing object box for stationary objects
+                        obj["estimate"]
+                        if obj["motionless_count"]
+                        < camera_config.detect.stationary.threshold
+                        else obj["box"]
+                    )
                     for obj in object_tracker.tracked_objects.values()
-                    # if it has exceeded the stationary threshold
-                    if obj["motionless_count"]
-                    >= camera_config.detect.stationary.threshold
-                    # and it hasn't disappeared
-                    and object_tracker.disappeared[obj["id"]] == 0
-                    # and it doesn't overlap with any current motion boxes when not calibrating
-                    and not intersects_any(
-                        obj["box"],
-                        [] if motion_detector.is_calibrating() else motion_boxes,
+                    if obj["id"] not in stationary_object_ids
+                ]
+                object_boxes = tracked_object_boxes + object_tracker.untracked_object_boxes
+
+                # get consolidated regions for tracked objects
+                regions = [
+                    get_cluster_region(
+                        frame_shape, region_min_size, candidate, object_boxes
+                    )
+                    for candidate in get_cluster_candidates(
+                        frame_shape, region_min_size, object_boxes
                     )
                 ]
 
-            # get tracked object boxes that aren't stationary
-            tracked_object_boxes = [
-                (
-                    # use existing object box for stationary objects
-                    obj["estimate"]
-                    if obj["motionless_count"]
-                    < camera_config.detect.stationary.threshold
-                    else obj["box"]
-                )
-                for obj in object_tracker.tracked_objects.values()
-                if obj["id"] not in stationary_object_ids
-            ]
-            object_boxes = tracked_object_boxes + object_tracker.untracked_object_boxes
+                # only add in the motion boxes when not calibrating and a ptz is not moving via autotracking
+                # ptz_moving_at_frame_time() always returns False for non-autotracking cameras
+                if not motion_detector.is_calibrating() and not ptz_moving_at_frame_time(
+                    frame_time,
+                    ptz_metrics.start_time.value,
+                    ptz_metrics.stop_time.value,
+                ):
+                    # find motion boxes that are not inside tracked object regions
+                    standalone_motion_boxes = [
+                        b for b in motion_boxes if not inside_any(b, regions)
+                    ]
 
-            # get consolidated regions for tracked objects
-            regions = [
-                get_cluster_region(
-                    frame_shape, region_min_size, candidate, object_boxes
-                )
-                for candidate in get_cluster_candidates(
-                    frame_shape, region_min_size, object_boxes
-                )
-            ]
-
-            # only add in the motion boxes when not calibrating and a ptz is not moving via autotracking
-            # ptz_moving_at_frame_time() always returns False for non-autotracking cameras
-            if not motion_detector.is_calibrating() and not ptz_moving_at_frame_time(
-                frame_time,
-                ptz_metrics.start_time.value,
-                ptz_metrics.stop_time.value,
-            ):
-                # find motion boxes that are not inside tracked object regions
-                standalone_motion_boxes = [
-                    b for b in motion_boxes if not inside_any(b, regions)
-                ]
-
-                if standalone_motion_boxes:
-                    motion_clusters = get_cluster_candidates(
-                        frame_shape,
-                        region_min_size,
-                        standalone_motion_boxes,
-                    )
-                    motion_regions = [
-                        get_cluster_region_from_grid(
+                    if standalone_motion_boxes:
+                        motion_clusters = get_cluster_candidates(
                             frame_shape,
                             region_min_size,
-                            candidate,
                             standalone_motion_boxes,
-                            region_grid,
                         )
-                        for candidate in motion_clusters
-                    ]
-                    regions += motion_regions
+                        motion_regions = [
+                            get_cluster_region_from_grid(
+                                frame_shape,
+                                region_min_size,
+                                candidate,
+                                standalone_motion_boxes,
+                                region_grid,
+                            )
+                            for candidate in motion_clusters
+                        ]
+                        regions += motion_regions
 
-            # if starting up, get the next startup scan region
-            if startup_scan:
-                for region in get_startup_regions(
-                    frame_shape, region_min_size, region_grid
-                ):
-                    regions.append(region)
-                startup_scan = False
+                # if starting up, get the next startup scan region
+                if startup_scan:
+                    for region in get_startup_regions(
+                        frame_shape, region_min_size, region_grid
+                    ):
+                        regions.append(region)
+                    startup_scan = False
 
-            # resize regions and detect
-            # seed with stationary objects
-            detections = [
-                (
-                    obj["label"],
-                    obj["score"],
-                    obj["box"],
-                    obj["area"],
-                    obj["ratio"],
-                    obj["region"],
+                regions = roi_controller.apply(regions, frame_shape)
+                camera_metrics.roi_profile_active.value = (
+                    1 if roi_controller.active_profile is not None else 0
                 )
-                for obj in object_tracker.tracked_objects.values()
-                if obj["id"] in stationary_object_ids
-            ]
+                camera_metrics.roi_profile_version.value = roi_controller.active_version
 
-            for region in regions:
-                detections.extend(
-                    detect(
-                        camera_config.detect,
-                        object_detector,
-                        frame,
-                        model_config,
-                        region,
-                        camera_config.objects.track,
-                        camera_config.objects.filters,
+                # resize regions and detect
+                # seed with stationary objects
+                detections = [
+                    (
+                        obj["label"],
+                        obj["score"],
+                        obj["box"],
+                        obj["area"],
+                        obj["ratio"],
+                        obj["region"],
                     )
-                )
-
-            consolidated_detections = reduce_detections(frame_shape, detections)
-
-            # if detection was run on this frame, consolidate
-            if len(regions) > 0:
-                tracked_detections = [
-                    d for d in consolidated_detections if d[0] not in all_attributes
+                    for obj in object_tracker.tracked_objects.values()
+                    if obj["id"] in stationary_object_ids
                 ]
-                # now that we have refined our detections, we need to track objects
-                object_tracker.match_and_update(
-                    frame_name, frame_time, tracked_detections
+
+                for region in regions:
+                    detections.extend(
+                        detect(
+                            camera_config.detect,
+                            object_detector,
+                            frame,
+                            model_config,
+                            region,
+                            active_objects_to_track,
+                            active_object_filters,
+                        )
+                    )
+
+                consolidated_detections = reduce_detections(frame_shape, detections)
+
+                # if detection was run on this frame, consolidate
+                if len(regions) > 0:
+                    tracked_detections = [
+                        d for d in consolidated_detections if d[0] not in all_attributes
+                    ]
+                    # now that we have refined our detections, we need to track objects
+                    object_tracker.match_and_update(
+                        frame_name, frame_time, tracked_detections
+                    )
+                # else, just update the frame times for the stationary objects
+                else:
+                    object_tracker.update_frame_times(frame_name, frame_time)
+
+                inference_latency_ms = (time.perf_counter() - infer_start) * 1000
+                if inference_latency_ms_ema == 0:
+                    inference_latency_ms_ema = inference_latency_ms
+                else:
+                    inference_latency_ms_ema = (0.8 * inference_latency_ms_ema) + (
+                        0.2 * inference_latency_ms
+                    )
+
+                queue_depth = get_queue_depth(frame_queue)
+                adaptive_controller.update(queue_depth, inference_latency_ms_ema)
+                camera_metrics.adaptive_overload.value = int(adaptive_controller.overloaded)
+                camera_metrics.adaptive_skip_frames.value = adaptive_controller.skip_frames
+                camera_metrics.adaptive_inference_latency_ms.value = (
+                    inference_latency_ms_ema
                 )
-            # else, just update the frame times for the stationary objects
-            else:
-                object_tracker.update_frame_times(frame_name, frame_time)
 
         # group the attribute detections based on what label they apply to
         attribute_detections: dict[str, list[TrackedObjectAttribute]] = {}
@@ -1015,6 +1318,17 @@ def process_frames(
                     detections[selected_object_id]["attributes"].append(
                         attribute.get_tracking_data()
                     )
+
+        if (
+            adaptive_controller.overloaded
+            and adaptive_settings.shed_non_critical_events
+            and critical_labels_set
+        ):
+            detections = {
+                obj_id: data
+                for obj_id, data in detections.items()
+                if data["label"] in critical_labels_set
+            }
 
         # debug object tracking
         if False:

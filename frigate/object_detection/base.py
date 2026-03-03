@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from multiprocessing import Queue, Value
 from multiprocessing.synchronize import Event as MpEvent
+from typing import Any
 
 import numpy as np
 import zmq
@@ -30,6 +31,22 @@ from frigate.util.process import FrigateProcess
 from .util import tensor_transform
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_detection_request(item: Any) -> tuple[str, str, str, str | None]:
+    """Normalize legacy and enriched queue payloads."""
+    if isinstance(item, str):
+        return item, "normal", "default", None
+
+    if isinstance(item, dict):
+        camera = str(item.get("camera", ""))
+        priority = str(item.get("priority", "normal"))
+        tenant = str(item.get("tenant", "default"))
+        affinity = item.get("affinity")
+        affinity_key = str(affinity) if affinity is not None else None
+        return camera, priority, tenant, affinity_key
+
+    return str(item), "normal", "default", None
 
 
 class ObjectDetector(ABC):
@@ -115,6 +132,7 @@ class DetectorRunner(FrigateProcess):
         self,
         name,
         detection_queue: Queue,
+        detection_queue_priority: Queue,
         cameras: list[str],
         avg_speed: Value,
         start_time: Value,
@@ -124,12 +142,35 @@ class DetectorRunner(FrigateProcess):
     ) -> None:
         super().__init__(stop_event, PROCESS_PRIORITY_HIGH, name=name, daemon=True)
         self.detection_queue = detection_queue
+        self.detection_queue_priority = detection_queue_priority
         self.cameras = cameras
         self.avg_speed = avg_speed
         self.start_time = start_time
         self.config = config
         self.detector_config = detector_config
         self.outputs: dict = {}
+        self.priority_lane: str = str(
+            getattr(detector_config, "priority_lane", "balanced")
+        ).lower()
+        affinity = getattr(detector_config, "camera_affinity_keys", None) or []
+        self.camera_affinity_keys: set[str] = set(affinity)
+
+    def _read_queue(self) -> Any | None:
+        queue_order = []
+        if self.priority_lane == "high":
+            queue_order = [self.detection_queue_priority, self.detection_queue]
+        elif self.priority_lane == "normal":
+            queue_order = [self.detection_queue, self.detection_queue_priority]
+        else:
+            queue_order = [self.detection_queue_priority, self.detection_queue]
+
+        for idx, q in enumerate(queue_order):
+            timeout = 0.8 if idx == 0 else 0.2
+            try:
+                return q.get(timeout=timeout)
+            except queue.Empty:
+                continue
+        return None
 
     def create_output_shm(self, name: str):
         out_shm = UntrackedSharedMemory(name=f"out-{name}", create=False)
@@ -147,10 +188,23 @@ class DetectorRunner(FrigateProcess):
             self.create_output_shm(name)
 
         while not self.stop_event.is_set():
-            try:
-                connection_id = self.detection_queue.get(timeout=1)
-            except queue.Empty:
+            item = self._read_queue()
+            if item is None:
                 continue
+            connection_id, priority, _, affinity_key = _parse_detection_request(item)
+            if (
+                self.camera_affinity_keys
+                and affinity_key
+                and affinity_key not in self.camera_affinity_keys
+            ):
+                (
+                    self.detection_queue_priority
+                    if priority == "high"
+                    else self.detection_queue
+                ).put(item)
+                time.sleep(0.005)
+                continue
+
             input_frame = frame_manager.get(
                 connection_id,
                 (
@@ -189,6 +243,7 @@ class AsyncDetectorRunner(FrigateProcess):
         self,
         name,
         detection_queue: Queue,
+        detection_queue_priority: Queue,
         cameras: list[str],
         avg_speed: Value,
         start_time: Value,
@@ -198,6 +253,7 @@ class AsyncDetectorRunner(FrigateProcess):
     ) -> None:
         super().__init__(stop_event, PROCESS_PRIORITY_HIGH, name=name, daemon=True)
         self.detection_queue = detection_queue
+        self.detection_queue_priority = detection_queue_priority
         self.cameras = cameras
         self.avg_speed = avg_speed
         self.start_time = start_time
@@ -208,6 +264,28 @@ class AsyncDetectorRunner(FrigateProcess):
         self._publisher: ObjectDetectorPublisher | None = None
         self._detector: AsyncLocalObjectDetector | None = None
         self.send_times = deque()
+        self.priority_lane: str = str(
+            getattr(detector_config, "priority_lane", "balanced")
+        ).lower()
+        affinity = getattr(detector_config, "camera_affinity_keys", None) or []
+        self.camera_affinity_keys: set[str] = set(affinity)
+
+    def _read_queue(self) -> Any | None:
+        queue_order = []
+        if self.priority_lane == "high":
+            queue_order = [self.detection_queue_priority, self.detection_queue]
+        elif self.priority_lane == "normal":
+            queue_order = [self.detection_queue, self.detection_queue_priority]
+        else:
+            queue_order = [self.detection_queue_priority, self.detection_queue]
+
+        for idx, q in enumerate(queue_order):
+            timeout = 0.8 if idx == 0 else 0.2
+            try:
+                return q.get(timeout=timeout)
+            except queue.Empty:
+                continue
+        return None
 
     def create_output_shm(self, name: str):
         out_shm = UntrackedSharedMemory(name=f"out-{name}", create=False)
@@ -217,9 +295,21 @@ class AsyncDetectorRunner(FrigateProcess):
     def _detect_worker(self) -> None:
         logger.info("Starting Detect Worker Thread")
         while not self.stop_event.is_set():
-            try:
-                connection_id = self.detection_queue.get(timeout=1)
-            except queue.Empty:
+            item = self._read_queue()
+            if item is None:
+                continue
+            connection_id, priority, _, affinity_key = _parse_detection_request(item)
+            if (
+                self.camera_affinity_keys
+                and affinity_key
+                and affinity_key not in self.camera_affinity_keys
+            ):
+                (
+                    self.detection_queue_priority
+                    if priority == "high"
+                    else self.detection_queue
+                ).put(item)
+                time.sleep(0.005)
                 continue
 
             input_frame = self._frame_manager.get(
@@ -314,6 +404,7 @@ class ObjectDetectProcess:
         self,
         name: str,
         detection_queue: Queue,
+        detection_queue_priority: Queue,
         cameras: list[str],
         config: FrigateConfig,
         detector_config: BaseDetectorConfig,
@@ -322,6 +413,7 @@ class ObjectDetectProcess:
         self.name = name
         self.cameras = cameras
         self.detection_queue = detection_queue
+        self.detection_queue_priority = detection_queue_priority
         self.avg_inference_speed = Value("d", 0.01)
         self.detection_start = Value("d", 0.0)
         self.detect_process: FrigateProcess | None = None
@@ -353,6 +445,7 @@ class ObjectDetectProcess:
             self.detect_process = AsyncDetectorRunner(
                 f"frigate.detector:{self.name}",
                 self.detection_queue,
+                self.detection_queue_priority,
                 self.cameras,
                 self.avg_inference_speed,
                 self.detection_start,
@@ -364,6 +457,7 @@ class ObjectDetectProcess:
             self.detect_process = DetectorRunner(
                 f"frigate.detector:{self.name}",
                 self.detection_queue,
+                self.detection_queue_priority,
                 self.cameras,
                 self.avg_inference_speed,
                 self.detection_start,
@@ -380,14 +474,20 @@ class RemoteObjectDetector:
         name: str,
         labels: dict[int, str],
         detection_queue: Queue,
+        detection_queue_priority: Queue,
         model_config: ModelConfig,
         stop_event: MpEvent,
+        priority_routing=None,
+        camera_metrics=None,
     ):
         self.labels = labels
         self.name = name
         self.fps = EventsPerSecond()
         self.detection_queue = detection_queue
+        self.detection_queue_priority = detection_queue_priority
         self.stop_event = stop_event
+        self.priority_routing = priority_routing
+        self.camera_metrics = camera_metrics
         self.shm = UntrackedSharedMemory(name=self.name, create=False)
         self.np_shm = np.ndarray(
             (1, model_config.height, model_config.width, 3),
@@ -415,7 +515,49 @@ class RemoteObjectDetector:
 
         # copy input to shared memory
         self.np_shm[:] = tensor_input[:]
-        self.detection_queue.put(self.name)
+        routing_enabled = bool(
+            self.priority_routing and getattr(self.priority_routing, "enabled", False)
+        )
+        high_priority = bool(
+            routing_enabled
+            and getattr(self.priority_routing, "high_priority", False)
+        )
+        affinity_key = (
+            None
+            if not routing_enabled
+            else getattr(self.priority_routing, "worker_affinity_key", None)
+        )
+
+        if self.camera_metrics is not None:
+            self.camera_metrics.routing_high_priority.value = int(high_priority)
+            self.camera_metrics.routing_affinity_active.value = int(bool(affinity_key))
+
+        if routing_enabled and not high_priority:
+            try:
+                queue_depth = self.detection_queue.qsize()
+            except (NotImplementedError, AttributeError):
+                queue_depth = 0
+            max_depth = int(
+                getattr(self.priority_routing, "max_normal_queue_depth", 32)
+            )
+            if queue_depth >= max_depth:
+                if self.camera_metrics is not None:
+                    self.camera_metrics.routing_quota_drops.value += 1
+                return detections
+
+        request = {
+            "camera": self.name,
+            "priority": "high" if high_priority else "normal",
+            "tenant": (
+                getattr(self.priority_routing, "tenant_key", "default")
+                if routing_enabled
+                else "default"
+            ),
+            "affinity": affinity_key,
+        }
+        (self.detection_queue_priority if high_priority else self.detection_queue).put(
+            request
+        )
         result = self.detector_subscriber.check_for_update()
 
         # if it timed out

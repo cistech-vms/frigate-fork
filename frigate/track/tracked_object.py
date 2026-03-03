@@ -16,6 +16,7 @@ from frigate.config import (
     SnapshotsConfig,
     UIConfig,
 )
+from frigate.config.camera.zone import ZoneModeEnum
 from frigate.const import CLIPS_DIR, THUMB_DIR
 from frigate.detectors.detector_config import ModelConfig
 from frigate.review.types import SeverityEnum
@@ -62,6 +63,7 @@ class TrackedObject:
         self.frame_cache = frame_cache
         self.zone_presence: dict[str, int] = {}
         self.zone_loitering: dict[str, int] = {}
+        self.zone_prev_inside: dict[str, bool] = {}
         self.current_zones: list[str] = []
         self.entered_zones: list[str] = []
         self.attributes: dict[str, float] = defaultdict(float)
@@ -194,8 +196,21 @@ class TrackedObject:
             contour = zone.contour
             zone_score = self.zone_presence.get(name, 0) + 1
 
-            # check if the object is in the zone
-            if cv2.pointPolygonTest(contour, bottom_center, False) >= 0:
+            inside_now = cv2.pointPolygonTest(contour, bottom_center, False) >= 0
+            previous_inside = self.zone_prev_inside.get(name)
+            transition_detected = (
+                previous_inside is not None and previous_inside != inside_now
+            )
+            self.zone_prev_inside[name] = inside_now
+
+            mode = zone.mode
+
+            # check if the object matches the zone mode
+            if (
+                (mode == ZoneModeEnum.inside and inside_now)
+                or (mode == ZoneModeEnum.crossing and transition_detected)
+                or (mode == ZoneModeEnum.enter_exit and (inside_now or transition_detected))
+            ):
                 # if the object passed the filters once, dont apply again
                 if name in self.current_zones or not zone_filtered(self, zone.filters):
                     # Calculate speed first if this is a speed zone
@@ -266,7 +281,11 @@ class TrackedObject:
                         ):
                             in_loitering_zone = True
 
-                        loitering_score = self.zone_loitering.get(name, 0) + 1
+                        loitering_score = (
+                            self.zone_loitering.get(name, 0) + 1
+                            if mode == ZoneModeEnum.inside
+                            else zone.loitering_time * self.camera_config.detect.fps
+                        )
 
                         # loitering time is configured as seconds, convert to count of frames
                         if loitering_score >= (

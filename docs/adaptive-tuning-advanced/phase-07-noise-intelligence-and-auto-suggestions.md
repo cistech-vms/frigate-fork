@@ -9,6 +9,28 @@ Nesta fase eu transformo historico operacional em recomendacoes de tuning para r
 - Exibir impacto estimado antes de aplicar.
 - Permitir aprovacao manual ou auto-aprovacao restrita.
 
+## Implementacao aplicada
+- Motor de sugestoes em `frigate/headless/noise_intelligence.py`.
+- Deteccao de ruido por camera usando sinais operacionais:
+  - `skipped_fps`
+  - `adaptive_overload`
+  - `routing_quota_drops`
+- Tipos de sugestao gerados:
+  - ajuste de `threshold`
+  - ajuste de `cooldown`
+  - ativacao de perfil baseline de ROI
+  - recomendacao de mascara dinamica (manual)
+- Cada sugestao inclui `estimated_impact` antes de aplicar.
+- Fluxo de aprovacao:
+  - manual para qualquer risco
+  - auto-aprovacao restrita a `risk=low`
+- Trilha de auditoria para sugestoes aplicadas.
+
+## Endpoints adicionados
+- `GET /v1/noise/suggestions`
+- `POST /v1/noise/suggestions/{suggestion_id}/approve`
+- `GET /v1/noise/audit`
+
 ## Diagrama - ciclo de sugestao
 ```mermaid
 flowchart LR

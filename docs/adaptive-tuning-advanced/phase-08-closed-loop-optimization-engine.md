@@ -9,6 +9,26 @@ Nesta fase eu conecto observabilidade, regra adaptativa e rollout em um ciclo co
 - Aplicar limites de seguranca para evitar oscilacao.
 - Congelar alteracoes automaticas em incidentes maiores.
 
+## Implementacao aplicada
+- Motor de loop fechado em `frigate/headless/closed_loop.py`.
+- Ciclo integrado com:
+  - observabilidade (`stats`)
+  - sugestoes (`noise_intelligence`)
+  - rollout controlado (`canary`)
+- Janela/frequencia configuravel via estado de loop:
+  - `observation_interval_sec`
+  - `canary_duration_sec`
+- Guardrails anti-oscillacao:
+  - `reapply_cooldown_sec` por camera/tipo
+  - limite de historico e decisao registrada
+- Freeze automatico:
+  - por incidente maior (saturacao disseminada)
+  - por streak de rollback de canary
+- Controle operacional por API:
+  - `GET /v1/optimization/loop/status`
+  - `POST /v1/optimization/loop/control`
+- `GET /v1/status` passa a incluir estado/decisao do loop fechado.
+
 ## Diagrama - loop fechado
 ```mermaid
 flowchart LR

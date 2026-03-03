@@ -1,5 +1,6 @@
 # this uses the base model because the color is an extra attribute
 import logging
+from enum import Enum
 from typing import Optional, Union
 
 import numpy as np
@@ -7,9 +8,15 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_valid
 
 from .objects import FilterConfig
 
-__all__ = ["ZoneConfig"]
+__all__ = ["ZoneConfig", "ZoneModeEnum"]
 
 logger = logging.getLogger(__name__)
+
+
+class ZoneModeEnum(str, Enum):
+    inside = "inside"
+    crossing = "crossing"
+    enter_exit = "enter_exit"
 
 
 class ZoneConfig(BaseModel):
@@ -44,6 +51,10 @@ class ZoneConfig(BaseModel):
     objects: Union[str, list[str]] = Field(
         default_factory=list,
         title="List of objects that can trigger the zone.",
+    )
+    mode: ZoneModeEnum = Field(
+        default=ZoneModeEnum.inside,
+        title="Zone activation mode.",
     )
     _color: Optional[tuple[int, int, int]] = PrivateAttr()
     _contour: np.ndarray = PrivateAttr()

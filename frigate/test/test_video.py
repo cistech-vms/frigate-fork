@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -13,6 +14,7 @@ from frigate.util.object import (
     get_region_from_grid,
     reduce_detections,
 )
+from frigate.video import AdaptiveLoadController
 
 
 def draw_box(frame, box, color=(255, 0, 0), thickness=2):
@@ -320,6 +322,63 @@ class TestObjectBoundingBoxes(unittest.TestCase):
         consolidated_detections = reduce_detections(frame_shape, detections)
         assert len(consolidated_detections) == len(detections)
 
+
+class TestAdaptiveLoadController(unittest.TestCase):
+    def _build_controller(self) -> AdaptiveLoadController:
+        adaptive_settings = SimpleNamespace(
+            enabled=True,
+            queue_high_watermark=1,
+            queue_recovery_watermark=0,
+            inference_latency_high_ms=100.0,
+            inference_latency_recovery_ms=70.0,
+            min_skip_frames=0,
+            max_skip_frames=3,
+            recovery_stable_cycles=2,
+            critical_labels=["person"],
+            shed_non_critical_events=True,
+        )
+        camera_config = SimpleNamespace(
+            name="front", detect=SimpleNamespace(adaptive_load_shedding=adaptive_settings)
+        )
+        return AdaptiveLoadController(camera_config)
+
+    def test_enters_overload_and_increases_skip(self):
+        controller = self._build_controller()
+
+        controller.update(queue_depth=2, inference_latency_ms=30.0)
+        self.assertTrue(controller.overloaded)
+        self.assertEqual(controller.skip_frames, 1)
+
+        controller.update(queue_depth=2, inference_latency_ms=30.0)
+        self.assertEqual(controller.skip_frames, 2)
+
+    def test_recovery_reduces_skip_and_exits(self):
+        controller = self._build_controller()
+        controller.update(queue_depth=2, inference_latency_ms=120.0)
+        controller.update(queue_depth=2, inference_latency_ms=120.0)
+        self.assertTrue(controller.overloaded)
+        self.assertEqual(controller.skip_frames, 2)
+
+        controller.update(queue_depth=0, inference_latency_ms=40.0)
+        self.assertTrue(controller.overloaded)
+        self.assertEqual(controller.skip_frames, 2)
+
+        controller.update(queue_depth=0, inference_latency_ms=40.0)
+        self.assertEqual(controller.skip_frames, 1)
+
+        controller.update(queue_depth=0, inference_latency_ms=40.0)
+        controller.update(queue_depth=0, inference_latency_ms=40.0)
+        self.assertFalse(controller.overloaded)
+        self.assertEqual(controller.skip_frames, 0)
+
+    def test_skip_pattern(self):
+        controller = self._build_controller()
+        controller.skip_frames = 2
+
+        self.assertTrue(controller.should_skip_current_frame())
+        self.assertTrue(controller.should_skip_current_frame())
+        self.assertFalse(controller.should_skip_current_frame())
+        self.assertTrue(controller.should_skip_current_frame())
 
 class TestRegionGrid(unittest.TestCase):
     def setUp(self) -> None:

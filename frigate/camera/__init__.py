@@ -13,6 +13,14 @@ class CameraMetrics:
     read_start: Synchronized
     audio_rms: Synchronized
     audio_dBFS: Synchronized
+    adaptive_overload: Synchronized
+    adaptive_skip_frames: Synchronized
+    adaptive_inference_latency_ms: Synchronized
+    roi_profile_active: Synchronized
+    roi_profile_version: Synchronized
+    routing_high_priority: Synchronized
+    routing_quota_drops: Synchronized
+    routing_affinity_active: Synchronized
 
     frame_queue: mp.Queue
 
@@ -29,6 +37,14 @@ class CameraMetrics:
         self.read_start = manager.Value("d", 0)
         self.audio_rms = manager.Value("d", 0)
         self.audio_dBFS = manager.Value("d", 0)
+        self.adaptive_overload = manager.Value("i", 0)
+        self.adaptive_skip_frames = manager.Value("i", 0)
+        self.adaptive_inference_latency_ms = manager.Value("d", 0)
+        self.roi_profile_active = manager.Value("i", 0)
+        self.roi_profile_version = manager.Value("i", 0)
+        self.routing_high_priority = manager.Value("i", 0)
+        self.routing_quota_drops = manager.Value("i", 0)
+        self.routing_affinity_active = manager.Value("i", 0)
 
         self.frame_queue = manager.Queue(maxsize=2)
 

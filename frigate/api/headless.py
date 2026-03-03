@@ -14,7 +14,18 @@ from frigate.config.camera.updater import (
     CameraConfigUpdateEnum,
     CameraConfigUpdateTopic,
 )
-from frigate.headless.runtime_config import diff_top_level_keys, requires_restart
+from frigate.headless.runtime_config import (
+    CanaryPolicy,
+    diff_top_level_keys,
+    requires_restart,
+)
+from frigate.headless.noise_intelligence import generate_noise_suggestions
+from frigate.headless.closed_loop import run_closed_loop_iteration
+from frigate.headless.governance import (
+    append_audit_entry,
+    build_monthly_scorecard,
+    current_period,
+)
 from frigate.headless.security import Principal, require_role, resolve_tenant
 from frigate.stats.prometheus import get_metrics, update_metrics
 
@@ -27,11 +38,58 @@ ops_router = APIRouter(tags=["headless-ops"])
 class ConfigApplyRequest(BaseModel):
     tenant_id: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
+    canary: bool = False
+    canary_cameras: list[str] = Field(default_factory=list)
+    canary_duration_sec: int = Field(default=300, ge=30, le=3600)
+    canary_max_skipped_fps_increase: float = Field(default=2.0, ge=0.0)
+    canary_min_process_fps_ratio: float = Field(default=0.7, ge=0.1, le=1.0)
+    canary_max_inference_latency_increase_pct: float = Field(default=35.0, ge=0.0)
 
 
 class ConfigValidateRequest(BaseModel):
     tenant_id: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class SuggestionApproveRequest(BaseModel):
+    tenant_id: str | None = None
+    auto_approve: bool = False
+
+
+class ClosedLoopControlRequest(BaseModel):
+    enabled: bool | None = None
+    observation_interval_sec: int | None = Field(default=None, ge=30, le=3600)
+    freeze_sec: int | None = Field(default=None, ge=0, le=86400)
+
+
+class GovernancePolicyRequest(BaseModel):
+    policy_version: int | None = Field(default=None, ge=1)
+    owner: str | None = None
+    approval_mode: Literal["manual", "mixed", "auto_low_risk"] | None = None
+    technical_committee: list[str] | None = None
+
+
+class RecalibrationScheduleRequest(BaseModel):
+    segment: str
+    cameras: list[str] = Field(default_factory=list)
+    frequency_days: int = Field(default=30, ge=1, le=365)
+    owner: str = Field(default="unassigned")
+    enabled: bool = True
+
+
+def _apply_zones_hot_reload(request: Request, patch: dict[str, Any]) -> None:
+    cameras_patch = patch.get("cameras", {}) if isinstance(patch, dict) else {}
+    for camera_name, camera_patch in cameras_patch.items():
+        zones = camera_patch.get("zones") if isinstance(camera_patch, dict) else None
+        if zones is None:
+            continue
+        if camera_name not in request.app.frigate_config.cameras:
+            continue
+        request.app.frigate_config.cameras[camera_name].zones = zones
+        request.app.config_publisher.publish_update(
+            CameraConfigUpdateTopic(CameraConfigUpdateEnum.zones, camera_name),
+            zones,
+        )
 
 
 class TriggerAction(BaseModel):
@@ -81,12 +139,69 @@ class RegionModel(BaseModel):
 @router.get("/status", dependencies=[Depends(require_role("reader"))])
 def status(request: Request):
     stats = request.app.stats_emitter.get_latest_stats()
+    canary = request.app.state.runtime_config_store.evaluate_canary(stats, time.time())
+    loop_state = request.app.state.headless_closed_loop
+    tenant_id = request.app.state.headless_settings.tenant_id or "default"
+    loop_decision = run_closed_loop_iteration(
+        loop_state,
+        request.app.state.runtime_config_store,
+        stats,
+        request.app.state.runtime_config_store.effective_dict(),
+        tenant_id,
+        now_ts=time.time(),
+    )
+    gov_state: dict[str, Any] = request.app.state.headless_governance
+    if loop_decision.get("status") == "started":
+        append_audit_entry(
+            gov_state,
+            {
+                "ts": int(time.time()),
+                "period": current_period(),
+                "origin": "automatic",
+                "action": "apply",
+                "source": "closed_loop",
+                "suggestion_id": loop_decision.get("suggestion_id"),
+                "camera": loop_decision.get("camera"),
+                "change_type": loop_decision.get("type"),
+            },
+        )
+    if canary.get("status") == "promoted":
+        append_audit_entry(
+            gov_state,
+            {
+                "ts": int(time.time()),
+                "period": current_period(),
+                "origin": "automatic",
+                "action": "promote",
+                "source": "canary",
+                "canary_id": canary.get("id"),
+            },
+        )
+    if canary.get("status") == "rolled_back":
+        append_audit_entry(
+            gov_state,
+            {
+                "ts": int(time.time()),
+                "period": current_period(),
+                "origin": "automatic",
+                "action": "rollback",
+                "source": "canary",
+                "canary_id": canary.get("id"),
+                "reason": canary.get("reason"),
+            },
+        )
     return JSONResponse(
         content={
             "uptime_sec": int(time.time() - request.app.state.headless_started_at),
             "version": request.app.frigate_config.version,
             "cameras": list(request.app.frigate_config.cameras.keys()),
             "stats": stats,
+            "canary": canary,
+            "closed_loop": {
+                "enabled": bool(loop_state.get("enabled", True)),
+                "decision": loop_decision,
+                "freeze_until_ts": int(loop_state.get("freeze_until_ts", 0.0)),
+            },
             "headless": True,
         }
     )
@@ -121,6 +236,30 @@ def config_apply(request: Request, body: ConfigApplyRequest):
     before = store.effective_dict()
 
     try:
+        if body.canary:
+            policy = CanaryPolicy(
+                cameras=body.canary_cameras,
+                duration_sec=body.canary_duration_sec,
+                max_skipped_fps_increase=body.canary_max_skipped_fps_increase,
+                min_process_fps_ratio=body.canary_min_process_fps_ratio,
+                max_inference_latency_increase_pct=body.canary_max_inference_latency_increase_pct,
+            )
+            latest_stats = request.app.stats_emitter.get_latest_stats()
+            _, applied_patch, canary_status = store.start_canary(
+                body.config, policy, latest_stats, time.time()
+            )
+            _apply_zones_hot_reload(request, applied_patch)
+            after = store.effective_dict()
+            changed = diff_top_level_keys(before, after)
+            restart_needed = requires_restart(changed)
+            return JSONResponse(
+                content={
+                    "requires_restart": restart_needed,
+                    "changes": changed,
+                    "message": "Canary rollout started",
+                    "canary": canary_status,
+                }
+            )
         store.apply_runtime_patch(body.config)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -130,18 +269,19 @@ def config_apply(request: Request, body: ConfigApplyRequest):
     restart_needed = requires_restart(changed)
 
     # Apply hot reload for zones only.
-    cameras_patch = body.config.get("cameras", {}) if isinstance(body.config, dict) else {}
-    for camera_name, camera_patch in cameras_patch.items():
-        zones = camera_patch.get("zones") if isinstance(camera_patch, dict) else None
-        if zones is None:
-            continue
-        if camera_name not in request.app.frigate_config.cameras:
-            continue
-        request.app.frigate_config.cameras[camera_name].zones = zones
-        request.app.config_publisher.publish_update(
-            CameraConfigUpdateTopic(CameraConfigUpdateEnum.zones, camera_name),
-            zones,
-        )
+    _apply_zones_hot_reload(request, body.config)
+    append_audit_entry(
+        request.app.state.headless_governance,
+        {
+            "ts": int(time.time()),
+            "period": current_period(),
+            "origin": "manual",
+            "action": "apply",
+            "source": "config_apply",
+            "changes": changed,
+            "requires_restart": restart_needed,
+        },
+    )
 
     message = "Configuration applied with hot reload where supported"
     if restart_needed:
@@ -154,6 +294,33 @@ def config_apply(request: Request, body: ConfigApplyRequest):
             "message": message,
         }
     )
+
+
+@router.get("/config/canary/status", dependencies=[Depends(require_role("reader"))])
+def config_canary_status(request: Request):
+    stats = request.app.stats_emitter.get_latest_stats()
+    result = request.app.state.runtime_config_store.evaluate_canary(stats, time.time())
+    return JSONResponse(content=result)
+
+
+@router.post("/config/canary/rollback", dependencies=[Depends(require_role("admin"))])
+def config_canary_rollback(request: Request):
+    stats = request.app.stats_emitter.get_latest_stats()
+    result = request.app.state.runtime_config_store.rollback_canary(
+        "Manual rollback requested", stats, time.time()
+    )
+    append_audit_entry(
+        request.app.state.headless_governance,
+        {
+            "ts": int(time.time()),
+            "period": current_period(),
+            "origin": "manual",
+            "action": "rollback",
+            "source": "canary",
+            "reason": "Manual rollback requested",
+        },
+    )
+    return JSONResponse(content=result)
 
 
 @router.post("/reload", dependencies=[Depends(require_role("admin"))])
@@ -284,6 +451,195 @@ def events_stream(request: Request):
             sse_client.unregister_stream(stream_queue)
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+@router.get("/noise/suggestions", dependencies=[Depends(require_role("reader"))])
+def noise_suggestions(request: Request):
+    tenant_id = resolve_tenant(request)
+    stats = request.app.stats_emitter.get_latest_stats()
+    effective = request.app.state.runtime_config_store.effective_dict()
+    items = generate_noise_suggestions(stats, effective, tenant_id)
+
+    store: dict[str, dict[str, Any]] = request.app.state.headless_noise_suggestions
+    store.clear()
+    for item in items:
+        store[item["id"]] = item
+
+    return JSONResponse(content={"items": items})
+
+
+@router.post(
+    "/noise/suggestions/{suggestion_id}/approve",
+    dependencies=[Depends(require_role("admin"))],
+)
+def noise_suggestion_approve(
+    request: Request, suggestion_id: str, body: SuggestionApproveRequest
+):
+    tenant_id = resolve_tenant(request, body.tenant_id)
+    store: dict[str, dict[str, Any]] = request.app.state.headless_noise_suggestions
+    suggestion = store.get(suggestion_id)
+    if not suggestion or suggestion.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+
+    if body.auto_approve and suggestion.get("risk") != "low":
+        raise HTTPException(
+            status_code=403,
+            detail="Auto-approval is restricted to low-risk suggestions",
+        )
+
+    patch = suggestion.get("patch")
+    if not patch:
+        raise HTTPException(
+            status_code=422,
+            detail="Suggestion requires manual geometry/patch before applying",
+        )
+
+    runtime_store = request.app.state.runtime_config_store
+    before = runtime_store.effective_dict()
+
+    try:
+        runtime_store.apply_runtime_patch(patch)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    after = runtime_store.effective_dict()
+    changed = diff_top_level_keys(before, after)
+    restart_needed = requires_restart(changed)
+    _apply_zones_hot_reload(request, patch)
+
+    audit_entry = {
+        "suggestion_id": suggestion_id,
+        "tenant_id": tenant_id,
+        "applied_at": int(time.time()),
+        "auto_approve": body.auto_approve,
+        "changes": changed,
+        "requires_restart": restart_needed,
+    }
+    request.app.state.headless_noise_audit.append(audit_entry)
+    append_audit_entry(
+        request.app.state.headless_governance,
+        {
+            "ts": int(time.time()),
+            "period": current_period(),
+            "origin": "manual" if not body.auto_approve else "automatic",
+            "action": "apply",
+            "source": "noise_suggestion",
+            "suggestion_id": suggestion_id,
+            "changes": changed,
+            "requires_restart": restart_needed,
+        },
+    )
+    suggestion["status"] = "applied"
+
+    return JSONResponse(
+        content={
+            "success": True,
+            "requires_restart": restart_needed,
+            "changes": changed,
+            "audit": audit_entry,
+        }
+    )
+
+
+@router.get("/noise/audit", dependencies=[Depends(require_role("reader"))])
+def noise_audit(request: Request):
+    tenant_id = resolve_tenant(request)
+    entries: list[dict[str, Any]] = request.app.state.headless_noise_audit
+    filtered = [entry for entry in entries if entry.get("tenant_id") == tenant_id]
+    return JSONResponse(content={"items": filtered})
+
+
+@router.get("/optimization/loop/status", dependencies=[Depends(require_role("reader"))])
+def optimization_loop_status(request: Request):
+    stats = request.app.stats_emitter.get_latest_stats()
+    runtime_store = request.app.state.runtime_config_store
+    canary = runtime_store.evaluate_canary(stats, time.time())
+    loop_state: dict[str, Any] = request.app.state.headless_closed_loop
+    return JSONResponse(
+        content={
+            "enabled": bool(loop_state.get("enabled", True)),
+            "observation_interval_sec": int(loop_state.get("observation_interval_sec", 180)),
+            "freeze_until_ts": int(loop_state.get("freeze_until_ts", 0.0)),
+            "last_decision": loop_state.get("last_decision", {}),
+            "history": loop_state.get("history", []),
+            "canary": canary,
+        }
+    )
+
+
+@router.post("/optimization/loop/control", dependencies=[Depends(require_role("admin"))])
+def optimization_loop_control(request: Request, body: ClosedLoopControlRequest):
+    state: dict[str, Any] = request.app.state.headless_closed_loop
+    if body.enabled is not None:
+        state["enabled"] = body.enabled
+    if body.observation_interval_sec is not None:
+        state["observation_interval_sec"] = body.observation_interval_sec
+    if body.freeze_sec is not None:
+        state["freeze_until_ts"] = time.time() + body.freeze_sec
+
+    return JSONResponse(
+        content={
+            "enabled": bool(state.get("enabled", True)),
+            "observation_interval_sec": int(state.get("observation_interval_sec", 180)),
+            "freeze_until_ts": int(state.get("freeze_until_ts", 0.0)),
+        }
+    )
+
+
+@router.get("/governance/policy", dependencies=[Depends(require_role("reader"))])
+def governance_policy(request: Request):
+    return JSONResponse(content=request.app.state.headless_governance)
+
+
+@router.post("/governance/policy", dependencies=[Depends(require_role("admin"))])
+def governance_policy_update(request: Request, body: GovernancePolicyRequest):
+    state: dict[str, Any] = request.app.state.headless_governance
+    if body.policy_version is not None:
+        state["policy_version"] = body.policy_version
+    if body.owner is not None:
+        state["owner"] = body.owner
+    if body.approval_mode is not None:
+        state["approval_mode"] = body.approval_mode
+    if body.technical_committee is not None:
+        state["technical_committee"] = body.technical_committee
+    return JSONResponse(content=state)
+
+
+@router.get("/governance/audit", dependencies=[Depends(require_role("reader"))])
+def governance_audit(request: Request):
+    state: dict[str, Any] = request.app.state.headless_governance
+    return JSONResponse(content={"items": state.get("audit_entries", [])})
+
+
+@router.get(
+    "/governance/recalibration/schedule", dependencies=[Depends(require_role("reader"))]
+)
+def governance_recalibration_schedule(request: Request):
+    state: dict[str, Any] = request.app.state.headless_governance
+    return JSONResponse(content={"items": state.get("recalibration_schedule", {})})
+
+
+@router.post(
+    "/governance/recalibration/schedule", dependencies=[Depends(require_role("admin"))]
+)
+def governance_recalibration_schedule_upsert(
+    request: Request, body: RecalibrationScheduleRequest
+):
+    state: dict[str, Any] = request.app.state.headless_governance
+    schedule: dict[str, Any] = state.setdefault("recalibration_schedule", {})
+    schedule[body.segment] = body.model_dump(mode="json")
+    return JSONResponse(content={"success": True, "item": schedule[body.segment]})
+
+
+@router.get("/governance/scorecard", dependencies=[Depends(require_role("reader"))])
+def governance_scorecard(request: Request, period: str | None = None):
+    stats = request.app.stats_emitter.get_latest_stats()
+    gov_state: dict[str, Any] = request.app.state.headless_governance
+    use_period = period or current_period()
+    scorecard = build_monthly_scorecard(
+        stats, gov_state.get("audit_entries", []), use_period
+    )
+    return JSONResponse(content=scorecard)
 
 
 @ops_router.get("/healthz")

@@ -90,6 +90,7 @@ class FrigateApp:
         self.audio_process: Optional[mp.Process] = None
         self.stop_event = stop_event
         self.detection_queue: Queue = mp.Queue()
+        self.detection_queue_priority: Queue = mp.Queue()
         self.detectors: dict[str, ObjectDetectProcess] = {}
         self.detection_shms: list[mp.shared_memory.SharedMemory] = []
         self.log_queue: Queue = mp.Queue()
@@ -376,6 +377,7 @@ class FrigateApp:
             self.detectors[name] = ObjectDetectProcess(
                 name,
                 self.detection_queue,
+                self.detection_queue_priority,
                 list(self.config.cameras.keys()),
                 self.config,
                 detector_config,
@@ -409,6 +411,7 @@ class FrigateApp:
         self.camera_maintainer = CameraMaintainer(
             self.config,
             self.detection_queue,
+            self.detection_queue_priority,
             self.detected_frames_queue,
             self.camera_metrics,
             self.ptz_metrics,
@@ -610,6 +613,7 @@ class FrigateApp:
             detector.stop()
 
         empty_and_close_queue(self.detection_queue)
+        empty_and_close_queue(self.detection_queue_priority)
         logger.info("Detection queue closed")
 
         self.detected_frames_processor.join()

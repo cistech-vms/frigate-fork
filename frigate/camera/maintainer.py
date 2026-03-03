@@ -29,6 +29,7 @@ class CameraMaintainer(threading.Thread):
         self,
         config: FrigateConfig,
         detection_queue: Queue,
+        detection_queue_priority: Queue,
         detected_frames_queue: Queue,
         camera_metrics: DictProxy,
         ptz_metrics: dict[str, PTZMetrics],
@@ -38,6 +39,7 @@ class CameraMaintainer(threading.Thread):
         super().__init__(name="camera_processor")
         self.config = config
         self.detection_queue = detection_queue
+        self.detection_queue_priority = detection_queue_priority
         self.detected_frames_queue = detected_frames_queue
         self.stop_event = stop_event
         self.camera_metrics = camera_metrics
@@ -131,6 +133,7 @@ class CameraMaintainer(threading.Thread):
             self.config.model,
             self.config.model.merged_labelmap,
             self.detection_queue,
+            self.detection_queue_priority,
             self.detected_frames_queue,
             self.camera_metrics[name],
             self.ptz_metrics[name],
