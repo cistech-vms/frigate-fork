@@ -22,3 +22,13 @@ Migrações complexas podem exigir janela operacional planejada em ambientes de 
 
 ## Próximos passos
 Eu avanço para idempotência ponta a ponta.
+
+## Implementação aplicada
+- Manager de migração com histórico (`apply`/`rollback`) e versionamento de schema.
+- Integração de auditoria em trilha persistida para cada operação de migração.
+- Endpoints de operação para aplicar, reverter e inspecionar estado de migração.
+
+## Evidência de operação
+- `POST /v1/resilience/migrations/apply`
+- `POST /v1/resilience/migrations/rollback`
+- `GET /v1/resilience/migrations/status`

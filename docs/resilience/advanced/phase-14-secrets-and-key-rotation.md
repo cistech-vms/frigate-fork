@@ -22,3 +22,13 @@ A maturidade depende de disciplina contínua de operação e revisão periódica
 
 ## Próximos passos
 Eu formalizo versionamento de contrato de API e eventos.
+
+## Implementação aplicada
+- Rotação com dupla chave (`active` + `previous`) e revogação explícita de chave anterior.
+- Masking de segredo na visualização operacional.
+- Trilha de auditoria persistida para eventos de rotação e revogação.
+
+## Evidência de operação
+- `POST /v1/resilience/secrets/rotate`
+- `POST /v1/resilience/secrets/revoke/{name}`
+- `GET /v1/resilience/secrets/status`

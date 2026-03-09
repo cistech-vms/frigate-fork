@@ -3,6 +3,7 @@
 import copy
 import json
 import logging
+import os
 import queue
 import time
 from typing import Any, Literal
@@ -25,6 +26,8 @@ from frigate.headless.observability import (
     build_observability_snapshot,
     evaluate_release_gate,
 )
+from frigate.headless.backup_restore import BackupRestoreManager
+from frigate.headless.contracts import validate_contract_compatibility, with_contract_metadata
 from frigate.headless.closed_loop import run_closed_loop_iteration
 from frigate.headless.governance import (
     append_audit_entry,
@@ -103,6 +106,75 @@ class StorageConfigRequest(BaseModel):
     region: str | None = None
     endpoint: str | None = None
     prefix: str | None = None
+
+
+class BackupCreateRequest(BaseModel):
+    name: str = "runtime"
+    mode: Literal["incremental", "full"] = "incremental"
+    include_runtime_state: bool = True
+    include_rate_limit_state: bool = True
+
+
+class BackupRestoreRequest(BaseModel):
+    backup_id: str
+    restore_runtime_state: bool = True
+    restore_rate_limit_state: bool = True
+
+
+class SecretRotateRequest(BaseModel):
+    name: str
+    value: str
+
+
+class ContractValidationRequest(BaseModel):
+    requested_api_version: str | None = None
+
+
+class MigrationApplyRequest(BaseModel):
+    target_version: int = Field(ge=1)
+    backup_id: str | None = None
+
+
+class IdempotencyCheckRequest(BaseModel):
+    tenant_id: str | None = None
+    request_key: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class DrExerciseRequest(BaseModel):
+    scenario: str
+    rpo_sec: int = Field(default=300, ge=0)
+    rto_sec: int = Field(default=900, ge=0)
+    success: bool = True
+
+
+class QuotaSetRequest(BaseModel):
+    tenant_id: str
+    api_write_per_min: int = Field(default=120, ge=1)
+    storage_objects: int = Field(default=100000, ge=1)
+    events_per_min: int = Field(default=5000, ge=1)
+
+
+class QuotaConsumeRequest(BaseModel):
+    tenant_id: str
+    resource: Literal["api_write_per_min", "storage_objects", "events_per_min"]
+    amount: int = Field(default=1, ge=1)
+
+
+class SupplyChainScanRequest(BaseModel):
+    vulnerabilities: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SupplyChainSignRequest(BaseModel):
+    image_ref: str
+
+
+class LoadChaosRecordRequest(BaseModel):
+    profile: str
+    latency_ms: float = Field(ge=0.0)
+    event_loss_pct: float = Field(ge=0.0)
+    backlog: int = Field(ge=0)
+    recovery_sec: int = Field(ge=0)
 
 
 def _apply_zones_hot_reload(request: Request, patch: dict[str, Any]) -> None:
@@ -188,6 +260,36 @@ def _self_heal_if_needed(request: Request, reason: str) -> None:
     request.app.state.reliable_delivery.process_due()
     request.app.state.storage_sync.process_due()
     register_recovery(state, action="reconcile_workers", reason=reason)
+
+
+def _check_contract_header(request: Request) -> None:
+    requested = request.headers.get("x-api-contract-version")
+    ok, reason = validate_contract_compatibility(requested)
+    if not ok:
+        raise HTTPException(
+            status_code=426,
+            detail={"error": "Unsupported API contract version", "reason": reason},
+        )
+
+
+def _check_idempotency(request: Request, tenant_id: str, payload: Any) -> None:
+    key = request.headers.get("x-idempotency-key")
+    if not key:
+        return
+    duplicated, item = request.app.state.headless_idempotency.record_or_get(
+        tenant_id=tenant_id,
+        request_key=key,
+        payload=payload,
+    )
+    if duplicated:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Duplicated idempotent request",
+                "reason": "idempotency_key_reused",
+                "recorded_at": item.get("recorded_at"),
+            },
+        )
 
 
 class TriggerAction(BaseModel):
@@ -317,7 +419,9 @@ def config_effective(request: Request):
 @router.post("/config/validate", dependencies=[Depends(require_role("admin"))])
 def config_validate(request: Request, body: ConfigValidateRequest):
     _ensure_write_allowed(request)
+    _check_contract_header(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
+    _check_idempotency(request, tenant_id, body.model_dump(mode="json"))
     del tenant_id
     store = request.app.state.runtime_config_store
 
@@ -332,7 +436,9 @@ def config_validate(request: Request, body: ConfigValidateRequest):
 @router.post("/config/apply", dependencies=[Depends(require_role("admin"))])
 def config_apply(request: Request, body: ConfigApplyRequest):
     _ensure_write_allowed(request)
+    _check_contract_header(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
+    _check_idempotency(request, tenant_id, body.model_dump(mode="json"))
     active_tenant = _runtime_tenant(request, tenant_id)
     del tenant_id
 
@@ -451,7 +557,9 @@ def reload_supported_components(request: Request):
 @router.post("/triggers/upsert", dependencies=[Depends(require_role("admin"))])
 def upsert_trigger(request: Request, body: TriggerModel):
     _ensure_write_allowed(request)
+    _check_contract_header(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
+    _check_idempotency(request, tenant_id, body.model_dump(mode="json"))
     if tenant_id != body.tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
 
@@ -492,7 +600,9 @@ def delete_trigger(request: Request, trigger_id: str):
 @router.post("/cameras/{camera_id}/regions/upsert", dependencies=[Depends(require_role("admin"))])
 def upsert_region(request: Request, camera_id: str, body: RegionModel):
     _ensure_write_allowed(request)
+    _check_contract_header(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
+    _check_idempotency(request, tenant_id, body.model_dump(mode="json"))
     if tenant_id != body.tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
     if camera_id != body.camera_id:
@@ -603,7 +713,13 @@ def noise_suggestion_approve(
     request: Request, suggestion_id: str, body: SuggestionApproveRequest
 ):
     _ensure_write_allowed(request)
+    _check_contract_header(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
+    _check_idempotency(
+        request,
+        tenant_id,
+        {"suggestion_id": suggestion_id, **body.model_dump(mode="json")},
+    )
     store: dict[str, dict[str, Any]] = request.app.state.headless_noise_suggestions
     suggestion = store.get(suggestion_id)
     if not suggestion or suggestion.get("tenant_id") != tenant_id:
@@ -862,6 +978,212 @@ def resilience_storage_config(request: Request, body: StorageConfigRequest):
 @router.get("/resilience/storage/sync/status", dependencies=[Depends(require_role("reader"))])
 def resilience_storage_sync_status(request: Request):
     return JSONResponse(content=request.app.state.storage_sync.status())
+
+
+@router.post("/resilience/backup/create", dependencies=[Depends(require_role("admin"))])
+def resilience_backup_create(request: Request, body: BackupCreateRequest):
+    _ensure_write_allowed(request)
+    _check_contract_header(request)
+    manager = BackupRestoreManager()
+    sources: dict[str, str] = {}
+    if body.include_runtime_state:
+        sources["headless_state"] = request.app.state.headless_state_store.path
+    if body.include_rate_limit_state:
+        sources["rate_limit_state"] = request.app.state.headless_rate_limiter.state_path
+    item = manager.create_backup(name=body.name, sources=sources, mode=body.mode)
+    return JSONResponse(content=with_contract_metadata({"success": True, "item": item}))
+
+
+@router.get("/resilience/backup/list", dependencies=[Depends(require_role("reader"))])
+def resilience_backup_list(request: Request, limit: int = 30):
+    manager = BackupRestoreManager()
+    return JSONResponse(content={"items": manager.list_backups(limit=limit)})
+
+
+@router.post("/resilience/backup/restore", dependencies=[Depends(require_role("admin"))])
+def resilience_backup_restore(request: Request, body: BackupRestoreRequest):
+    _ensure_write_allowed(request)
+    _check_contract_header(request)
+    manager = BackupRestoreManager()
+    targets: dict[str, str] = {}
+    if body.restore_runtime_state:
+        targets["headless_state"] = request.app.state.headless_state_store.path
+    if body.restore_rate_limit_state:
+        targets["rate_limit_state"] = request.app.state.headless_rate_limiter.state_path
+    item = manager.restore_backup(body.backup_id, targets)
+    return JSONResponse(content=with_contract_metadata({"success": True, "item": item}))
+
+
+@router.post("/resilience/secrets/rotate", dependencies=[Depends(require_role("admin"))])
+def resilience_secrets_rotate(request: Request, body: SecretRotateRequest):
+    _ensure_write_allowed(request)
+    _check_contract_header(request)
+    item = request.app.state.headless_secret_rotation.rotate(body.name, body.value)
+    request.app.state.headless_db_adapter.append_audit(
+        "secrets", {"event": "rotated", **item}
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/resilience/secrets/revoke/{name}", dependencies=[Depends(require_role("admin"))])
+def resilience_secrets_revoke(request: Request, name: str):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_secret_rotation.revoke_previous(name)
+    request.app.state.headless_db_adapter.append_audit(
+        "secrets", {"event": "revoked_previous", **item}
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/resilience/secrets/status", dependencies=[Depends(require_role("reader"))])
+def resilience_secrets_status(request: Request):
+    return JSONResponse(content=request.app.state.headless_secret_rotation.snapshot())
+
+
+@router.post("/resilience/contracts/validate", dependencies=[Depends(require_role("reader"))])
+def resilience_contract_validate(request: Request, body: ContractValidationRequest):
+    ok, reason = validate_contract_compatibility(body.requested_api_version)
+    code = 200 if ok else 426
+    return JSONResponse(content={"compatible": ok, "reason": reason}, status_code=code)
+
+
+@router.post("/resilience/migrations/apply", dependencies=[Depends(require_role("admin"))])
+def resilience_migrations_apply(request: Request, body: MigrationApplyRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_migrations.apply(
+        body.target_version, backup_id=body.backup_id
+    )
+    request.app.state.headless_db_adapter.append_audit(
+        "migrations", {"event": "apply", **item}
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/resilience/migrations/rollback", dependencies=[Depends(require_role("admin"))])
+def resilience_migrations_rollback(request: Request, body: MigrationApplyRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_migrations.rollback(body.target_version)
+    request.app.state.headless_db_adapter.append_audit(
+        "migrations", {"event": "rollback", **item}
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/resilience/migrations/status", dependencies=[Depends(require_role("reader"))])
+def resilience_migrations_status(request: Request):
+    return JSONResponse(content=request.app.state.headless_migrations.snapshot())
+
+
+@router.post("/resilience/idempotency/check", dependencies=[Depends(require_role("admin"))])
+def resilience_idempotency_check(request: Request, body: IdempotencyCheckRequest):
+    _ensure_write_allowed(request)
+    tenant_id = resolve_tenant(request, body.tenant_id)
+    duplicated, item = request.app.state.headless_idempotency.record_or_get(
+        tenant_id=tenant_id,
+        request_key=body.request_key,
+        payload=body.payload,
+    )
+    return JSONResponse(content={"duplicated": duplicated, "item": item})
+
+
+@router.get("/resilience/idempotency/status", dependencies=[Depends(require_role("reader"))])
+def resilience_idempotency_status(request: Request, limit: int = 100):
+    return JSONResponse(content={"items": request.app.state.headless_idempotency.snapshot(limit=limit)})
+
+
+@router.get("/resilience/runbooks", dependencies=[Depends(require_role("reader"))])
+def resilience_runbooks(request: Request):
+    return JSONResponse(content={"items": request.app.state.headless_runbooks})
+
+
+@router.post("/resilience/dr/exercise", dependencies=[Depends(require_role("admin"))])
+def resilience_dr_exercise(request: Request, body: DrExerciseRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_dr.record_exercise(
+        scenario=body.scenario,
+        rpo_sec=body.rpo_sec,
+        rto_sec=body.rto_sec,
+        success=body.success,
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/resilience/dr/status", dependencies=[Depends(require_role("reader"))])
+def resilience_dr_status(request: Request):
+    return JSONResponse(content=request.app.state.headless_dr.snapshot())
+
+
+@router.post("/resilience/quotas/set", dependencies=[Depends(require_role("admin"))])
+def resilience_quotas_set(request: Request, body: QuotaSetRequest):
+    _ensure_write_allowed(request)
+    quota = request.app.state.headless_quotas.set_quota(
+        body.tenant_id,
+        {
+            "api_write_per_min": body.api_write_per_min,
+            "storage_objects": body.storage_objects,
+            "events_per_min": body.events_per_min,
+        },
+    )
+    return JSONResponse(content={"success": True, "quota": quota})
+
+
+@router.post("/resilience/quotas/consume", dependencies=[Depends(require_role("admin"))])
+def resilience_quotas_consume(request: Request, body: QuotaConsumeRequest):
+    _ensure_write_allowed(request)
+    allowed, item = request.app.state.headless_quotas.consume(
+        body.tenant_id, body.resource, amount=body.amount
+    )
+    status_code = 200 if allowed else 429
+    return JSONResponse(content=item, status_code=status_code)
+
+
+@router.get("/resilience/quotas/status", dependencies=[Depends(require_role("reader"))])
+def resilience_quotas_status(request: Request):
+    return JSONResponse(content=request.app.state.headless_quotas.snapshot())
+
+
+@router.post("/resilience/supply-chain/sbom", dependencies=[Depends(require_role("admin"))])
+def resilience_supply_chain_sbom(request: Request):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_supply_chain.generate_sbom(os.getcwd())
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/resilience/supply-chain/scan", dependencies=[Depends(require_role("admin"))])
+def resilience_supply_chain_scan(request: Request, body: SupplyChainScanRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_supply_chain.record_scan(body.vulnerabilities)
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/resilience/supply-chain/sign", dependencies=[Depends(require_role("admin"))])
+def resilience_supply_chain_sign(request: Request, body: SupplyChainSignRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_supply_chain.sign_image(body.image_ref)
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/resilience/supply-chain/status", dependencies=[Depends(require_role("reader"))])
+def resilience_supply_chain_status(request: Request):
+    return JSONResponse(content=request.app.state.headless_supply_chain.snapshot())
+
+
+@router.post("/resilience/load-chaos/record", dependencies=[Depends(require_role("admin"))])
+def resilience_load_chaos_record(request: Request, body: LoadChaosRecordRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_load_chaos.record(
+        profile=body.profile,
+        latency_ms=body.latency_ms,
+        event_loss_pct=body.event_loss_pct,
+        backlog=body.backlog,
+        recovery_sec=body.recovery_sec,
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/resilience/load-chaos/summary", dependencies=[Depends(require_role("reader"))])
+def resilience_load_chaos_summary(request: Request):
+    return JSONResponse(content=request.app.state.headless_load_chaos.summary())
 
 
 @ops_router.get("/healthz")

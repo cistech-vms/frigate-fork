@@ -22,3 +22,14 @@ Hardening exige manutenção contínua; não é tarefa de execução única.
 
 ## Próximos passos
 Eu fecho com validação de carga e caos como gate final de robustez.
+
+## Implementação aplicada
+- Geração de SBOM simplificada por build com digest de manifesto de arquivos.
+- Registro de scan de vulnerabilidade com bloqueio de release em severidade crítica.
+- Assinatura lógica de imagem para rastreabilidade operacional.
+
+## Evidência de operação
+- `POST /v1/resilience/supply-chain/sbom`
+- `POST /v1/resilience/supply-chain/scan`
+- `POST /v1/resilience/supply-chain/sign`
+- `GET /v1/resilience/supply-chain/status`

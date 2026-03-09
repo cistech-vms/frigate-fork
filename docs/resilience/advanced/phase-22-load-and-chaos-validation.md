@@ -22,3 +22,12 @@ Sem ambiente de teste representativo, resultados podem não refletir totalmente 
 
 ## Próximos passos
 Eu consolido revisão contínua das fases para manter robustez ao longo da evolução do produto.
+
+## Implementação aplicada
+- Registro de resultados de carga/caos por perfil com métricas críticas.
+- Sumário com gate objetivo (`gate_passed`) por latência, perda, backlog e recuperação.
+- Endpoint operacional para histórico incremental e decisão de promoção.
+
+## Evidência de operação
+- `POST /v1/resilience/load-chaos/record`
+- `GET /v1/resilience/load-chaos/summary`

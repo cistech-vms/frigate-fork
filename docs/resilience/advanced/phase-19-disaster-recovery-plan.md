@@ -22,3 +22,12 @@ Sem ensaio periódico, plano de DR tende a ficar desatualizado frente à evoluç
 
 ## Próximos passos
 Eu documento isolamento multi-tenant com quotas e limites.
+
+## Implementação aplicada
+- Registro de exercícios de DR com `scenario`, `rpo_sec`, `rto_sec` e resultado.
+- Snapshot contínuo do plano e histórico de testes de recuperação.
+- Endpoint de operação para evidenciar readiness de DR por cenário.
+
+## Evidência de operação
+- `POST /v1/resilience/dr/exercise`
+- `GET /v1/resilience/dr/status`

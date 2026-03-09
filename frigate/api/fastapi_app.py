@@ -19,15 +19,23 @@ from frigate.embeddings import EmbeddingsContext
 from frigate.headless.runtime_config import init_runtime_store
 from frigate.headless.closed_loop import init_closed_loop_state
 from frigate.headless.db_adapter import build_database_adapter
+from frigate.headless.disaster_recovery import DisasterRecoveryPlan
 from frigate.headless.governance import init_governance_state
+from frigate.headless.idempotency import IdempotencyStore
+from frigate.headless.load_chaos_validation import LoadChaosValidator
+from frigate.headless.migrations import MigrationManager
 from frigate.headless.object_storage import build_object_storage_adapter
 from frigate.headless.readiness import evaluate_readiness
 from frigate.headless.rate_limit import DistributedRateLimiter
 from frigate.headless.redis_adapter import build_redis_adapter
 from frigate.headless.reliable_delivery import ReliableEventDelivery
+from frigate.headless.runbooks import default_runbooks
+from frigate.headless.secrets_rotation import SecretRotationManager
 from frigate.headless.self_healing import init_self_healing_state
 from frigate.headless.state_persistence import get_headless_state_store
 from frigate.headless.storage_sync import StorageSyncManager
+from frigate.headless.supply_chain import SupplyChainHardening
+from frigate.headless.tenant_isolation import TenantQuotaManager
 from frigate.headless.settings import get_headless_settings
 from frigate.ptz.onvif import OnvifController
 from frigate.stats.emitter import StatsEmitter
@@ -130,6 +138,14 @@ def create_fastapi_app(
     app.state.headless_db_adapter = build_database_adapter()
     app.state.headless_redis_adapter = build_redis_adapter()
     app.state.headless_object_storage = build_object_storage_adapter()
+    app.state.headless_secret_rotation = SecretRotationManager()
+    app.state.headless_migrations = MigrationManager()
+    app.state.headless_idempotency = IdempotencyStore()
+    app.state.headless_runbooks = default_runbooks()
+    app.state.headless_dr = DisasterRecoveryPlan()
+    app.state.headless_quotas = TenantQuotaManager()
+    app.state.headless_supply_chain = SupplyChainHardening()
+    app.state.headless_load_chaos = LoadChaosValidator()
     app.state.headless_rate_limiter = DistributedRateLimiter(
         limit_per_minute=headless_settings.rate_limit_per_minute,
         block_base_sec=headless_settings.rate_limit_block_base_sec,

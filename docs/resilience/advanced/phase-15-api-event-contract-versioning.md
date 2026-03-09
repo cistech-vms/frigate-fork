@@ -22,3 +22,11 @@ Sem automação de validação de contrato no CI, ainda existe risco de regress�
 
 ## Próximos passos
 Eu documento migrações seguras de schema e configuração.
+
+## Implementação aplicada
+- Metadados de contrato adicionados em respostas operacionais críticas.
+- Validação de compatibilidade via header de contrato (`x-api-contract-version`).
+- Endpoint dedicado para validar compatibilidade de versão de contrato.
+
+## Evidência de operação
+- `POST /v1/resilience/contracts/validate`

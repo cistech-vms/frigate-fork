@@ -22,3 +22,13 @@ Sem automação completa de restore, parte da recuperação ainda depende de exe
 
 ## Próximos passos
 Eu avanço para gestão de segredos e rotação de chaves.
+
+## Implementação aplicada
+- Manager de backup/restore com manifesto versionado e metadados de RPO/RTO.
+- Endpoints para criar, listar e restaurar backup do estado operacional.
+- Restore orientado por escopo (runtime/rate-limit) para recuperação controlada.
+
+## Evidência de operação
+- `POST /v1/resilience/backup/create`
+- `GET /v1/resilience/backup/list`
+- `POST /v1/resilience/backup/restore`

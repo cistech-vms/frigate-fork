@@ -22,3 +22,11 @@ Runbook sem treino operacional periódico perde efetividade ao longo do tempo.
 
 ## Próximos passos
 Eu avanço para plano de disaster recovery.
+
+## Implementação aplicada
+- Runbooks operacionais estruturados para `storage_offline`, `queue_accumulation` e `degraded_node`.
+- Checklist de triagem, recuperação e critério de escalonamento por cenário.
+- Exposição via endpoint para integração com automação e NOC.
+
+## Evidência de operação
+- `GET /v1/resilience/runbooks`

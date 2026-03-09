@@ -22,3 +22,12 @@ Idempotência depende de retenção de estado adequada para não perder contexto
 
 ## Próximos passos
 Eu consolido runbooks operacionais por cenário de incidente.
+
+## Implementação aplicada
+- Store de idempotência com TTL e deduplicação por `tenant + request_key + payload_hash`.
+- Enforcement em rotas críticas de escrita por `x-idempotency-key`.
+- Endpoint de inspeção/validação para uso operacional e testes de integração.
+
+## Evidência de operação
+- `POST /v1/resilience/idempotency/check`
+- `GET /v1/resilience/idempotency/status`

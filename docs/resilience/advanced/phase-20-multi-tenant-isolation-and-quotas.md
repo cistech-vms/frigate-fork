@@ -22,3 +22,13 @@ Quotas mal calibradas podem gerar rejeição excessiva ou subutilização de cap
 
 ## Próximos passos
 Eu evoluo hardening de supply chain e imagem.
+
+## Implementação aplicada
+- Gerenciador de quotas por tenant com consumo por recurso e auditoria de estouro.
+- Política de contenção com resposta `429` em excesso de quota.
+- Endpoint de configuração, consumo e inspeção para governança multi-tenant.
+
+## Evidência de operação
+- `POST /v1/resilience/quotas/set`
+- `POST /v1/resilience/quotas/consume`
+- `GET /v1/resilience/quotas/status`
