@@ -25,3 +25,8 @@ Manter Frigate como engine de inferência e tracking, adicionando camada de shar
 
 ## Saída da fase
 Especificação de topologia e responsabilidades por componente.
+
+## Implementação aplicada
+- Manager de scaling no data-plane com estado de plano por tenant, heartbeat e rollout.
+- Separação funcional entre plano desejado (`desired_version`) e convergência aplicada (`applied_version`).
+- Endpoints dedicados para aplicar plano, reconciliar estado e observar rollout.

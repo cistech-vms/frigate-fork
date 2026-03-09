@@ -12,3 +12,8 @@ Separar carga por partições para evitar contenção global.
 - Tabela de assignment por shard.
 - Política de failover e reassignment.
 - Limite máximo de câmeras por perfil de nó.
+
+## Implementação aplicada
+- Geração determinística de shard por `tenant_id + camera_id`.
+- Tabela de assignment por shard exposta via `GET /v1/scaling/shards/status`.
+- Rebalance com hysteresis e limite por nó via `POST /v1/scaling/shards/rebalance`.

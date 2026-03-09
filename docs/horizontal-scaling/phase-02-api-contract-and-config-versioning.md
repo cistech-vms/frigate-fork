@@ -12,3 +12,8 @@ Garantir aplicação consistente de config entre múltiplos nós.
 ## Critérios
 - Config inválida rejeitada antes de aplicar.
 - Aplicação parcial deve retornar diff + `requires_restart` + `rollback_hint`.
+
+## Implementação aplicada
+- `config_version` obrigatório em `POST /v1/scaling/plan/apply`.
+- Suporte a controle de concorrência com `if_match`/`etag`.
+- Reconciliação de drift por tenant em `GET /v1/scaling/reconcile/{tenant_id}`.

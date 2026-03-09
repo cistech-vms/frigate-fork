@@ -177,6 +177,49 @@ class LoadChaosRecordRequest(BaseModel):
     recovery_sec: int = Field(ge=0)
 
 
+class ScalingPlanApplyRequest(BaseModel):
+    tenant_id: str
+    config_version: int = Field(ge=1)
+    assigned_cameras: list[str] = Field(default_factory=list)
+    request_id: str | None = None
+    if_match: str | None = None
+
+
+class ScalingHeartbeatRequest(BaseModel):
+    tenant_id: str
+    fps: float = Field(ge=0.0)
+    queue_depth: int = Field(ge=0)
+    inference_latency_ms: float = Field(ge=0.0)
+
+
+class ScalingRebalanceRequest(BaseModel):
+    tenant_id: str
+    max_cameras_per_node: int = Field(default=32, ge=1, le=10000)
+
+
+class ScalingStorageStrategyRequest(BaseModel):
+    hot_state_backend: str = "local"
+    historical_backend: str = "local"
+    retention_by_tenant: dict[str, int] = Field(default_factory=dict)
+
+
+class ScalingEventPublishRequest(BaseModel):
+    tenant_id: str
+    priority: Literal["high", "normal", "low"] = "normal"
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScalingCanaryRequest(BaseModel):
+    tenant_id: str
+    target_version: int = Field(ge=1)
+    cameras: list[str] = Field(default_factory=list)
+
+
+class ScalingCanaryFinalizeRequest(BaseModel):
+    tenant_id: str
+    promote: bool = True
+
+
 def _apply_zones_hot_reload(request: Request, patch: dict[str, Any]) -> None:
     cameras_patch = patch.get("cameras", {}) if isinstance(patch, dict) else {}
     for camera_name, camera_patch in cameras_patch.items():
@@ -1184,6 +1227,138 @@ def resilience_load_chaos_record(request: Request, body: LoadChaosRecordRequest)
 @router.get("/resilience/load-chaos/summary", dependencies=[Depends(require_role("reader"))])
 def resilience_load_chaos_summary(request: Request):
     return JSONResponse(content=request.app.state.headless_load_chaos.summary())
+
+
+@router.post("/scaling/plan/apply", dependencies=[Depends(require_role("admin"))])
+def scaling_plan_apply(request: Request, body: ScalingPlanApplyRequest):
+    _ensure_write_allowed(request)
+    _check_contract_header(request)
+    _check_idempotency(request, body.tenant_id, body.model_dump(mode="json"))
+    manager = request.app.state.headless_horizontal_scaling
+    try:
+        item = manager.apply_plan(
+            tenant_id=body.tenant_id,
+            config_version=body.config_version,
+            assigned_cameras=body.assigned_cameras,
+            request_id=body.request_id,
+            if_match=body.if_match,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(content=with_contract_metadata({"success": True, "item": item}))
+
+
+@router.get("/scaling/reconcile/{tenant_id}", dependencies=[Depends(require_role("reader"))])
+def scaling_reconcile(request: Request, tenant_id: str):
+    manager = request.app.state.headless_horizontal_scaling
+    return JSONResponse(content=manager.reconcile(tenant_id))
+
+
+@router.post("/scaling/heartbeat", dependencies=[Depends(require_role("admin"))])
+def scaling_heartbeat(request: Request, body: ScalingHeartbeatRequest):
+    _ensure_write_allowed(request)
+    manager = request.app.state.headless_horizontal_scaling
+    item = manager.heartbeat(
+        tenant_id=body.tenant_id,
+        fps=body.fps,
+        queue_depth=body.queue_depth,
+        inference_latency_ms=body.inference_latency_ms,
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/scaling/shards/status", dependencies=[Depends(require_role("reader"))])
+def scaling_shards_status(request: Request):
+    manager = request.app.state.headless_horizontal_scaling
+    return JSONResponse(
+        content={
+            "shards": manager.state.get("shards", {}),
+            "metrics": manager.shard_metrics(),
+        }
+    )
+
+
+@router.post("/scaling/shards/rebalance", dependencies=[Depends(require_role("admin"))])
+def scaling_shards_rebalance(request: Request, body: ScalingRebalanceRequest):
+    _ensure_write_allowed(request)
+    manager = request.app.state.headless_horizontal_scaling
+    result = manager.rebalance(
+        body.tenant_id, max_cameras_per_node=body.max_cameras_per_node
+    )
+    return JSONResponse(content={"success": True, "result": result})
+
+
+@router.post("/scaling/storage/strategy", dependencies=[Depends(require_role("admin"))])
+def scaling_storage_strategy(request: Request, body: ScalingStorageStrategyRequest):
+    _ensure_write_allowed(request)
+    manager = request.app.state.headless_horizontal_scaling
+    item = manager.configure_storage_strategy(
+        hot_state_backend=body.hot_state_backend,
+        historical_backend=body.historical_backend,
+        tenant_retention=body.retention_by_tenant,
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/scaling/events/publish", dependencies=[Depends(require_role("admin"))])
+def scaling_events_publish(request: Request, body: ScalingEventPublishRequest):
+    _ensure_write_allowed(request)
+    manager = request.app.state.headless_horizontal_scaling
+    result = manager.publish_event(
+        tenant_id=body.tenant_id, priority=body.priority, payload=body.payload
+    )
+    if not result.get("accepted"):
+        raise HTTPException(status_code=429, detail=result)
+    return JSONResponse(content={"success": True, "result": result})
+
+
+@router.post("/scaling/events/process", dependencies=[Depends(require_role("admin"))])
+def scaling_events_process(request: Request, max_batch: int = 200):
+    _ensure_write_allowed(request)
+    manager = request.app.state.headless_horizontal_scaling
+    return JSONResponse(content=manager.process_event_tick(max_batch=max_batch))
+
+
+@router.get("/scaling/events/status", dependencies=[Depends(require_role("reader"))])
+def scaling_events_status(request: Request):
+    manager = request.app.state.headless_horizontal_scaling
+    return JSONResponse(content=manager.state.get("event_pipeline", {}))
+
+
+@router.get("/scaling/slo", dependencies=[Depends(require_role("reader"))])
+def scaling_slo(request: Request):
+    manager = request.app.state.headless_horizontal_scaling
+    return JSONResponse(content=manager.slo_snapshot())
+
+
+@router.post("/scaling/rollout/canary/start", dependencies=[Depends(require_role("admin"))])
+def scaling_rollout_canary_start(request: Request, body: ScalingCanaryRequest):
+    _ensure_write_allowed(request)
+    manager = request.app.state.headless_horizontal_scaling
+    item = manager.start_canary(
+        tenant_id=body.tenant_id,
+        target_version=body.target_version,
+        cameras=body.cameras,
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post(
+    "/scaling/rollout/canary/finalize", dependencies=[Depends(require_role("admin"))]
+)
+def scaling_rollout_canary_finalize(
+    request: Request, body: ScalingCanaryFinalizeRequest
+):
+    _ensure_write_allowed(request)
+    manager = request.app.state.headless_horizontal_scaling
+    item = manager.finalize_canary(body.tenant_id, promote=body.promote)
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/scaling/rollout/status", dependencies=[Depends(require_role("reader"))])
+def scaling_rollout_status(request: Request):
+    manager = request.app.state.headless_horizontal_scaling
+    return JSONResponse(content=manager.state.get("rollout", {}))
 
 
 @ops_router.get("/healthz")

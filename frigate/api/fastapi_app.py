@@ -21,6 +21,7 @@ from frigate.headless.closed_loop import init_closed_loop_state
 from frigate.headless.db_adapter import build_database_adapter
 from frigate.headless.disaster_recovery import DisasterRecoveryPlan
 from frigate.headless.governance import init_governance_state
+from frigate.headless.horizontal_scaling import HorizontalScalingManager
 from frigate.headless.idempotency import IdempotencyStore
 from frigate.headless.load_chaos_validation import LoadChaosValidator
 from frigate.headless.migrations import MigrationManager
@@ -146,6 +147,9 @@ def create_fastapi_app(
     app.state.headless_quotas = TenantQuotaManager()
     app.state.headless_supply_chain = SupplyChainHardening()
     app.state.headless_load_chaos = LoadChaosValidator()
+    app.state.headless_horizontal_scaling = HorizontalScalingManager(
+        node_id=os.getenv("FRIGATE_NODE_ID", "node-1")
+    )
     app.state.headless_rate_limiter = DistributedRateLimiter(
         limit_per_minute=headless_settings.rate_limit_per_minute,
         block_base_sec=headless_settings.rate_limit_block_base_sec,
