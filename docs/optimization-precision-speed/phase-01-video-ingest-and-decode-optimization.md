@@ -35,3 +35,7 @@ A deteccao fica mais previsivel e leve sob carga.
 
 ## Proximos passos
 Eu otimizo inferencia e modelo na Fase 02.
+
+## Implementacao aplicada
+- Configuracao de tuning de ingest/decode por tenant em `POST /v1/optimization/perf/ingest-decode`.
+- Parametros de detect fps/resolucao e decode assistido armazenados com trilha temporal.

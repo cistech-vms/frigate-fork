@@ -220,6 +220,44 @@ class ScalingCanaryFinalizeRequest(BaseModel):
     promote: bool = True
 
 
+class OptimizationBaselineRequest(BaseModel):
+    tier: Literal["edge_basic", "edge_medium", "edge_robust"]
+    profile: dict[str, Any] = Field(default_factory=dict)
+
+
+class OptimizationTargetsRequest(BaseModel):
+    inference_latency_p95_ms: float | None = Field(default=None, ge=1.0)
+    queue_depth_max: float | None = Field(default=None, ge=1.0)
+    drop_rate_max_pct: float | None = Field(default=None, ge=0.0)
+    event_delivery_latency_p95_ms: float | None = Field(default=None, ge=1.0)
+
+
+class OptimizationTenantConfigRequest(BaseModel):
+    tenant_id: str
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class OptimizationQueueRequest(BaseModel):
+    priority: Literal["critical", "normal", "best_effort"] = "normal"
+    amount: int = Field(default=1, ge=1, le=100000)
+
+
+class OptimizationDeliveryEfficiencyRequest(BaseModel):
+    ttl_by_criticality: dict[str, int] | None = None
+    compression_profile: str | None = None
+    retry_max_attempts: int | None = Field(default=None, ge=1, le=20)
+    retry_backoff_base_sec: float | None = Field(default=None, ge=0.1, le=120.0)
+
+
+class OptimizationBenchmarkRequest(BaseModel):
+    cameras: int = Field(ge=1, le=10000)
+    inference_p95_ms: float = Field(ge=0.0)
+    event_delivery_p95_ms: float = Field(ge=0.0)
+    drop_rate_pct: float = Field(ge=0.0)
+    queue_depth: int = Field(ge=0)
+    chaos_scenario: str | None = None
+
+
 def _apply_zones_hot_reload(request: Request, patch: dict[str, Any]) -> None:
     cameras_patch = patch.get("cameras", {}) if isinstance(patch, dict) else {}
     for camera_name, camera_patch in cameras_patch.items():
@@ -1359,6 +1397,120 @@ def scaling_rollout_canary_finalize(
 def scaling_rollout_status(request: Request):
     manager = request.app.state.headless_horizontal_scaling
     return JSONResponse(content=manager.state.get("rollout", {}))
+
+
+@router.post("/optimization/perf/baseline", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_baseline(request: Request, body: OptimizationBaselineRequest):
+    _ensure_write_allowed(request)
+    manager = request.app.state.headless_optimization
+    item = manager.collect_baseline(body.tier, body.profile)
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/optimization/perf/targets", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_targets(request: Request, body: OptimizationTargetsRequest):
+    _ensure_write_allowed(request)
+    manager = request.app.state.headless_optimization
+    targets = {k: v for k, v in body.model_dump(mode="json").items() if v is not None}
+    item = manager.set_targets(targets)
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/optimization/perf/ingest-decode", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_ingest_decode(
+    request: Request, body: OptimizationTenantConfigRequest
+):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_optimization.configure_ingest_decode(
+        body.tenant_id, body.config
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/optimization/perf/inference", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_inference(request: Request, body: OptimizationTenantConfigRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_optimization.configure_inference(
+        body.tenant_id, body.config
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/optimization/perf/tracking-regions", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_tracking_regions(
+    request: Request, body: OptimizationTenantConfigRequest
+):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_optimization.configure_tracking_regions(
+        body.tenant_id, body.config
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/optimization/perf/event-rules", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_event_rules(request: Request, body: OptimizationTenantConfigRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_optimization.configure_event_rules(
+        body.tenant_id, body.config
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/optimization/perf/queues/enqueue", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_queues_enqueue(request: Request, body: OptimizationQueueRequest):
+    _ensure_write_allowed(request)
+    result = request.app.state.headless_optimization.enqueue(
+        body.priority, amount=body.amount
+    )
+    if not result.get("accepted"):
+        raise HTTPException(status_code=429, detail=result)
+    return JSONResponse(content={"success": True, "result": result})
+
+
+@router.post("/optimization/perf/queues/process", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_queues_process(request: Request, amount: int = 200):
+    _ensure_write_allowed(request)
+    return JSONResponse(content=request.app.state.headless_optimization.process_queue(amount=amount))
+
+
+@router.post("/optimization/perf/delivery-efficiency", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_delivery_efficiency(
+    request: Request, body: OptimizationDeliveryEfficiencyRequest
+):
+    _ensure_write_allowed(request)
+    config = {k: v for k, v in body.model_dump(mode="json").items() if v is not None}
+    item = request.app.state.headless_optimization.configure_delivery_efficiency(config)
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/optimization/perf/benchmark", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_benchmark(request: Request, body: OptimizationBenchmarkRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_optimization.record_benchmark(
+        cameras=body.cameras,
+        inference_p95_ms=body.inference_p95_ms,
+        event_delivery_p95_ms=body.event_delivery_p95_ms,
+        drop_rate_pct=body.drop_rate_pct,
+        queue_depth=body.queue_depth,
+        chaos_scenario=body.chaos_scenario,
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/optimization/perf/gate", dependencies=[Depends(require_role("reader"))])
+def optimization_perf_gate(request: Request):
+    return JSONResponse(content=request.app.state.headless_optimization.benchmark_gate())
+
+
+@router.post("/optimization/perf/weekly-report", dependencies=[Depends(require_role("admin"))])
+def optimization_perf_weekly_report(request: Request):
+    _ensure_write_allowed(request)
+    return JSONResponse(content=request.app.state.headless_optimization.weekly_report())
+
+
+@router.get("/optimization/perf/status", dependencies=[Depends(require_role("reader"))])
+def optimization_perf_status(request: Request):
+    return JSONResponse(content=request.app.state.headless_optimization.snapshot())
 
 
 @ops_router.get("/healthz")

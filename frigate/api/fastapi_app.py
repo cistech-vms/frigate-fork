@@ -26,6 +26,7 @@ from frigate.headless.idempotency import IdempotencyStore
 from frigate.headless.load_chaos_validation import LoadChaosValidator
 from frigate.headless.migrations import MigrationManager
 from frigate.headless.object_storage import build_object_storage_adapter
+from frigate.headless.optimization_engine import OptimizationEngine
 from frigate.headless.readiness import evaluate_readiness
 from frigate.headless.rate_limit import DistributedRateLimiter
 from frigate.headless.redis_adapter import build_redis_adapter
@@ -150,6 +151,7 @@ def create_fastapi_app(
     app.state.headless_horizontal_scaling = HorizontalScalingManager(
         node_id=os.getenv("FRIGATE_NODE_ID", "node-1")
     )
+    app.state.headless_optimization = OptimizationEngine()
     app.state.headless_rate_limiter = DistributedRateLimiter(
         limit_per_minute=headless_settings.rate_limit_per_minute,
         block_base_sec=headless_settings.rate_limit_block_base_sec,

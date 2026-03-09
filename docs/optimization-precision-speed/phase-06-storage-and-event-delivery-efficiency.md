@@ -39,3 +39,7 @@ Entrega externa fica mais confiavel com menor impacto no motor de deteccao.
 
 ## Proximos passos
 Eu valido carga e gates objetivos na Fase 07.
+
+## Implementacao aplicada
+- Parametros de eficiencia de entrega/storage em `POST /v1/optimization/perf/delivery-efficiency`.
+- Backlog e DLQ operacional acompanhados no snapshot de status do engine de otimizacao.

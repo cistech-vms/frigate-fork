@@ -39,3 +39,8 @@ Otimizacoes passam a ser guiadas por numeros objetivos.
 
 ## Proximos passos
 Eu otimizo ingestao e decode na Fase 01.
+
+## Implementacao aplicada
+- Baseline por tier e perfil em `POST /v1/optimization/perf/baseline`.
+- Metas tecnicas versionadas em `POST /v1/optimization/perf/targets`.
+- Snapshot consolidado para operacao em `GET /v1/optimization/perf/status`.

@@ -36,3 +36,7 @@ Eventos se tornam mais confiaveis para automacao e resposta humana.
 
 ## Proximos passos
 Eu trato filas e backpressure na Fase 05.
+
+## Implementacao aplicada
+- Regras de evento por tenant em `POST /v1/optimization/perf/event-rules`.
+- Controle de cooldown/prioridade e ajustes de ruido com armazenamento versionado de configuracao.

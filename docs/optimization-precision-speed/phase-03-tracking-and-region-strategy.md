@@ -35,3 +35,7 @@ A qualidade do evento melhora sem custo alto de processamento adicional.
 
 ## Proximos passos
 Eu otimizo regras de evento e reducao de ruido na Fase 04.
+
+## Implementacao aplicada
+- Estrategia de tracking/regioes por tenant em `POST /v1/optimization/perf/tracking-regions`.
+- Ajustes de mascara/persistencia e revisao incremental orientada por perfil operacional.

@@ -40,3 +40,8 @@ A arquitetura permanece rapida e precisa mesmo com crescimento de carga e divers
 
 ## Proximos passos
 Eu reciclo o ciclo iniciando nova baseline apos cada release maior.
+
+## Implementacao aplicada
+- Relatorio semanal automatizado em `POST /v1/optimization/perf/weekly-report`.
+- Snapshot completo do ciclo continuo em `GET /v1/optimization/perf/status`.
+- Playbook de sintomas com acoes corretivas e historico de relatorios.

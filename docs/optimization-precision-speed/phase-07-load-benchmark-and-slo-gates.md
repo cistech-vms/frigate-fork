@@ -37,3 +37,8 @@ Confianca de producao passa a ser sustentada por evidencia, nao percepcao.
 
 ## Proximos passos
 Eu formalizo playbooks e tuning continuo na Fase 08.
+
+## Implementacao aplicada
+- Registro de benchmark/carga em `POST /v1/optimization/perf/benchmark`.
+- Gate de promocao objetivo em `GET /v1/optimization/perf/gate`.
+- Criterio baseado em targets de latencia, fila e taxa de drop.

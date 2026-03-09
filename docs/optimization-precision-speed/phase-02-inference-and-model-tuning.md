@@ -36,3 +36,7 @@ O motor de deteccao ganha velocidade com qualidade consistente.
 
 ## Proximos passos
 Eu refino tracking e estrategia de regioes na Fase 03.
+
+## Implementacao aplicada
+- Tuning de inferencia/modelo por tenant em `POST /v1/optimization/perf/inference`.
+- Registro de thresholds e politicas de paralelismo com impacto observavel no status consolidado.

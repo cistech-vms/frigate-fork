@@ -40,3 +40,9 @@ A operacao fica resiliente em carga alta sem colapsar fluxo principal.
 
 ## Proximos passos
 Eu otimizo eficiencia de storage e entrega de evento na Fase 06.
+
+## Implementacao aplicada
+- Filas por prioridade com enqueue/process em:
+  - `POST /v1/optimization/perf/queues/enqueue`
+  - `POST /v1/optimization/perf/queues/process`
+- Drop controlado para `best_effort` sob saturacao com metrica de `drops`.
