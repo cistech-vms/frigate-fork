@@ -52,6 +52,22 @@
 - linear/issues/optimization-precision-speed/07-load-benchmark-and-slo-gates.md
 - linear/issues/optimization-precision-speed/08-operational-playbook-and-continuous-tuning.md
 
+## production-readiness (14)
+- linear/issues/production-readiness/00-readiness-baseline-and-gap-analysis.md
+- linear/issues/production-readiness/01-environment-parity-and-dependencies.md
+- linear/issues/production-readiness/02-test-matrix-and-quality-gates.md
+- linear/issues/production-readiness/03-security-hardening-and-secret-governance.md
+- linear/issues/production-readiness/04-data-layer-and-migrations-hardening.md
+- linear/issues/production-readiness/05-distributed-state-and-rate-limit.md
+- linear/issues/production-readiness/06-event-delivery-and-backpressure-certification.md
+- linear/issues/production-readiness/07-observability-slo-and-alerting.md
+- linear/issues/production-readiness/08-performance-and-capacity-validation.md
+- linear/issues/production-readiness/09-disaster-recovery-and-backup-restore-drills.md
+- linear/issues/production-readiness/10-release-rollout-and-change-management.md
+- linear/issues/production-readiness/11-operational-runbooks-and-oncall-readiness.md
+- linear/issues/production-readiness/12-go-live-and-hypercare.md
+- linear/issues/production-readiness/13-post-go-live-optimization-and-governance.md
+
 ## resilience (13)
 - linear/issues/resilience/00-baseline-and-risk-register.md
 - linear/issues/resilience/01-auth-fail-closed-and-rbac-hardening.md
@@ -78,4 +94,3 @@
 - linear/issues/resilience-advanced/20-multi-tenant-isolation-and-quotas.md
 - linear/issues/resilience-advanced/21-supply-chain-and-image-hardening.md
 - linear/issues/resilience-advanced/22-load-and-chaos-validation.md
-

@@ -26,6 +26,7 @@ from frigate.headless.observability import (
     build_observability_snapshot,
     evaluate_release_gate,
 )
+from frigate.headless.production_readiness import build_production_readiness_report
 from frigate.headless.backup_restore import BackupRestoreManager
 from frigate.headless.contracts import validate_contract_compatibility, with_contract_metadata
 from frigate.headless.closed_loop import run_closed_loop_iteration
@@ -1078,6 +1079,46 @@ def resilience_release_gate(request: Request):
         storage_sync=request.app.state.storage_sync.status(),
     )
     return JSONResponse(content=evaluate_release_gate(snapshot))
+
+
+@router.get("/production/readiness", dependencies=[Depends(require_role("reader"))])
+def production_readiness_report(request: Request):
+    readiness = _compute_readiness(request)
+    delivery_status = request.app.state.reliable_delivery.snapshot()
+    storage_sync = request.app.state.storage_sync.status()
+    snapshot = build_observability_snapshot(
+        readiness=readiness,
+        delivery_status=delivery_status,
+        rate_limit_audit=request.app.state.headless_security_audit,
+        storage_sync=storage_sync,
+    )
+    release_gate = evaluate_release_gate(snapshot)
+    context = {
+        "env": dict(os.environ),
+        "settings": request.app.state.headless_settings.__dict__,
+        "readiness": readiness,
+        "release_gate": release_gate,
+        "migrations": request.app.state.headless_migrations.snapshot(),
+        "secrets": request.app.state.headless_secret_rotation.snapshot(),
+        "delivery": delivery_status,
+        "storage_sync": storage_sync,
+        "dr": request.app.state.headless_dr.snapshot(),
+        "backups": BackupRestoreManager().list_backups(limit=30),
+        "optimization_gate": request.app.state.headless_optimization.benchmark_gate(),
+        "optimization": request.app.state.headless_optimization.snapshot(),
+        "runbooks": request.app.state.headless_runbooks,
+        "governance": request.app.state.headless_governance,
+        "load_chaos_summary": request.app.state.headless_load_chaos.summary(),
+        "scaling_state": request.app.state.headless_horizontal_scaling.state,
+        "rate_limiter": {"configured": request.app.state.headless_rate_limiter is not None},
+        "redis_enabled": request.app.state.headless_redis_adapter is not None,
+        "contract_compatibility_checked": bool(
+            request.app.state.headless_governance.get("audit_entries")
+        ),
+        "oncall_drill_completed": bool(request.app.state.headless_dr.snapshot().get("exercises")),
+        "supply_chain": request.app.state.headless_supply_chain.snapshot(),
+    }
+    return JSONResponse(content=build_production_readiness_report(context))
 
 
 @router.post("/resilience/storage/config", dependencies=[Depends(require_role("admin"))])

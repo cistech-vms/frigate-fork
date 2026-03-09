@@ -9,6 +9,7 @@ Este diretorio contem as issues prontas para abertura no Linear, 1:1 com as fase
 - `issues/optimization-precision-speed/`
 - `issues/adaptive-tuning-advanced/`
 - `issues/cms-monorepo-nest-prisma/`
+- `issues/production-readiness/`
 
 ## Convencao de abertura no Linear
 - Criar 1 epic por trilha.
