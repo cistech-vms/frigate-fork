@@ -31,3 +31,13 @@ Em ambientes extremamente restritos, backlog prolongado pode exigir política de
 
 ## Próximos passos
 Após esta fase, eu fecho critérios de aceitação por tenant para rollout seguro em produção.
+
+## Implementação aplicada
+- Versionamento de configuração de storage por tenant (`storage_config_version`).
+- Fila de replicação com retry/backoff e dead-letter.
+- Reconciliador periódico para reprocessar pendências de sincronização.
+- Endpoint de observabilidade de sincronização com backlog, throughput, falhas e último sucesso.
+
+## Evidência de operação
+- `POST /v1/resilience/storage/config`
+- `GET /v1/resilience/storage/sync/status`

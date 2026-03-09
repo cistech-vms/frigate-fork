@@ -22,3 +22,11 @@ A maturidade final depende de disciplina contínua de operação e revisão peri
 
 ## Próximos passos
 Eu inicio execução técnica da Fase 01 e registro resultados incrementais em novos documentos de implementação.
+
+## Implementação aplicada
+- Gate de release em runtime com decisão `passed/reasons` baseada em readiness + SLO.
+- Critérios objetivos automatizáveis para bloqueio de promoção quando houver degradação.
+- Cobertura unitária para fluxo de observabilidade, sync e adapters resilientes.
+
+## Evidência de operação
+- `GET /v1/resilience/release-gate`

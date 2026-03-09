@@ -1,5 +1,6 @@
 """Headless runtime API for Frigate core engine."""
 
+import copy
 import json
 import logging
 import queue
@@ -20,12 +21,22 @@ from frigate.headless.runtime_config import (
     requires_restart,
 )
 from frigate.headless.noise_intelligence import generate_noise_suggestions
+from frigate.headless.observability import (
+    build_observability_snapshot,
+    evaluate_release_gate,
+)
 from frigate.headless.closed_loop import run_closed_loop_iteration
 from frigate.headless.governance import (
     append_audit_entry,
     build_monthly_scorecard,
     current_period,
 )
+from frigate.headless.self_healing import (
+    register_chaos_event,
+    register_recovery,
+    should_recover,
+)
+from frigate.headless.readiness import evaluate_readiness
 from frigate.headless.security import Principal, require_role, resolve_tenant
 from frigate.stats.prometheus import get_metrics, update_metrics
 
@@ -77,6 +88,23 @@ class RecalibrationScheduleRequest(BaseModel):
     enabled: bool = True
 
 
+class ChaosInjectionRequest(BaseModel):
+    scenario: Literal[
+        "delivery_worker_restart",
+        "simulate_webhook_failure",
+        "simulate_backpressure",
+    ]
+
+
+class StorageConfigRequest(BaseModel):
+    tenant_id: str | None = None
+    provider: Literal["local", "s3", "r2"] = "local"
+    bucket: str | None = None
+    region: str | None = None
+    endpoint: str | None = None
+    prefix: str | None = None
+
+
 def _apply_zones_hot_reload(request: Request, patch: dict[str, Any]) -> None:
     cameras_patch = patch.get("cameras", {}) if isinstance(patch, dict) else {}
     for camera_name, camera_patch in cameras_patch.items():
@@ -90,6 +118,76 @@ def _apply_zones_hot_reload(request: Request, patch: dict[str, Any]) -> None:
             CameraConfigUpdateTopic(CameraConfigUpdateEnum.zones, camera_name),
             zones,
         )
+
+
+def _runtime_tenant(request: Request, tenant_id: str | None = None) -> str:
+    if tenant_id:
+        request.app.state.headless_runtime_tenant = tenant_id
+        return tenant_id
+    return str(getattr(request.app.state, "headless_runtime_tenant", "default"))
+
+
+def _persist_runtime_overlay(request: Request, tenant_id: str | None = None) -> None:
+    request.app.state.headless_state_store.put_runtime_overlay(
+        _runtime_tenant(request, tenant_id),
+        request.app.state.runtime_config_store.runtime_overlay,
+    )
+
+
+def _persist_triggers(request: Request) -> None:
+    request.app.state.headless_state_store.put_triggers(request.app.state.headless_triggers)
+
+
+def _persist_regions(request: Request) -> None:
+    request.app.state.headless_state_store.put_regions(request.app.state.headless_regions)
+
+
+def _compute_readiness(request: Request) -> dict[str, Any]:
+    settings = request.app.state.headless_settings
+    stats = request.app.stats_emitter.get_latest_stats()
+    before_overlay = copy.deepcopy(request.app.state.runtime_config_store.runtime_overlay)
+    canary_status = request.app.state.runtime_config_store.evaluate_canary(stats, time.time())
+    if request.app.state.runtime_config_store.runtime_overlay != before_overlay:
+        _persist_runtime_overlay(request)
+    snapshot = evaluate_readiness(
+        stats=stats,
+        db_connected=not request.app.database.is_closed(),
+        sse_health=request.app.state.sse_client.stream_health(),
+        canary_status=canary_status,
+        started_at=request.app.state.headless_started_at,
+        warmup_sec=settings.readiness_warmup_sec,
+        min_process_fps=settings.readiness_min_process_fps,
+        max_skipped_process_ratio=settings.readiness_max_skipped_process_ratio,
+        max_sse_fill_ratio=settings.readiness_max_sse_fill_ratio,
+    )
+    request.app.state.headless_readiness = snapshot
+    if not snapshot.get("ready", False) or snapshot.get("mode") == "degraded_read_only":
+        _self_heal_if_needed(request, reason=f"readiness:{snapshot.get('mode')}")
+    return snapshot
+
+
+def _ensure_write_allowed(request: Request) -> None:
+    readiness = _compute_readiness(request)
+    if readiness.get("write_critical_allowed"):
+        return
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": "Write operations temporarily blocked by readiness gate",
+            "mode": readiness.get("mode"),
+            "reasons": readiness.get("reasons", []),
+            "warnings": readiness.get("warnings", []),
+        },
+    )
+
+
+def _self_heal_if_needed(request: Request, reason: str) -> None:
+    state: dict[str, Any] = request.app.state.headless_self_healing
+    if not should_recover(state):
+        return
+    request.app.state.reliable_delivery.process_due()
+    request.app.state.storage_sync.process_due()
+    register_recovery(state, action="reconcile_workers", reason=reason)
 
 
 class TriggerAction(BaseModel):
@@ -139,7 +237,10 @@ class RegionModel(BaseModel):
 @router.get("/status", dependencies=[Depends(require_role("reader"))])
 def status(request: Request):
     stats = request.app.stats_emitter.get_latest_stats()
+    before_overlay = copy.deepcopy(request.app.state.runtime_config_store.runtime_overlay)
     canary = request.app.state.runtime_config_store.evaluate_canary(stats, time.time())
+    if request.app.state.runtime_config_store.runtime_overlay != before_overlay:
+        _persist_runtime_overlay(request)
     loop_state = request.app.state.headless_closed_loop
     tenant_id = request.app.state.headless_settings.tenant_id or "default"
     loop_decision = run_closed_loop_iteration(
@@ -215,6 +316,7 @@ def config_effective(request: Request):
 
 @router.post("/config/validate", dependencies=[Depends(require_role("admin"))])
 def config_validate(request: Request, body: ConfigValidateRequest):
+    _ensure_write_allowed(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
     del tenant_id
     store = request.app.state.runtime_config_store
@@ -229,7 +331,9 @@ def config_validate(request: Request, body: ConfigValidateRequest):
 
 @router.post("/config/apply", dependencies=[Depends(require_role("admin"))])
 def config_apply(request: Request, body: ConfigApplyRequest):
+    _ensure_write_allowed(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
+    active_tenant = _runtime_tenant(request, tenant_id)
     del tenant_id
 
     store = request.app.state.runtime_config_store
@@ -249,6 +353,7 @@ def config_apply(request: Request, body: ConfigApplyRequest):
                 body.config, policy, latest_stats, time.time()
             )
             _apply_zones_hot_reload(request, applied_patch)
+            _persist_runtime_overlay(request, active_tenant)
             after = store.effective_dict()
             changed = diff_top_level_keys(before, after)
             restart_needed = requires_restart(changed)
@@ -261,6 +366,7 @@ def config_apply(request: Request, body: ConfigApplyRequest):
                 }
             )
         store.apply_runtime_patch(body.config)
+        _persist_runtime_overlay(request, active_tenant)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -299,16 +405,22 @@ def config_apply(request: Request, body: ConfigApplyRequest):
 @router.get("/config/canary/status", dependencies=[Depends(require_role("reader"))])
 def config_canary_status(request: Request):
     stats = request.app.stats_emitter.get_latest_stats()
+    before_overlay = copy.deepcopy(request.app.state.runtime_config_store.runtime_overlay)
     result = request.app.state.runtime_config_store.evaluate_canary(stats, time.time())
+    if request.app.state.runtime_config_store.runtime_overlay != before_overlay:
+        _persist_runtime_overlay(request)
     return JSONResponse(content=result)
 
 
 @router.post("/config/canary/rollback", dependencies=[Depends(require_role("admin"))])
 def config_canary_rollback(request: Request):
+    _ensure_write_allowed(request)
+    resolve_tenant(request)
     stats = request.app.stats_emitter.get_latest_stats()
     result = request.app.state.runtime_config_store.rollback_canary(
         "Manual rollback requested", stats, time.time()
     )
+    _persist_runtime_overlay(request)
     append_audit_entry(
         request.app.state.headless_governance,
         {
@@ -325,6 +437,8 @@ def config_canary_rollback(request: Request):
 
 @router.post("/reload", dependencies=[Depends(require_role("admin"))])
 def reload_supported_components(request: Request):
+    _ensure_write_allowed(request)
+    resolve_tenant(request)
     # Hot reload supported here is currently limited to regions/zones and triggers.
     return JSONResponse(
         content={
@@ -336,6 +450,7 @@ def reload_supported_components(request: Request):
 
 @router.post("/triggers/upsert", dependencies=[Depends(require_role("admin"))])
 def upsert_trigger(request: Request, body: TriggerModel):
+    _ensure_write_allowed(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
     if tenant_id != body.tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
@@ -343,11 +458,12 @@ def upsert_trigger(request: Request, body: TriggerModel):
     store: dict[str, dict[str, Any]] = request.app.state.headless_triggers
     trigger = body.model_dump(mode="json")
     store[body.id] = trigger
+    _persist_triggers(request)
 
     # Emit update event to stream subscribers.
-    request.app.state.sse_client.publish("triggers/upsert", trigger)
+    event_id = request.app.state.reliable_delivery.emit("triggers/upsert", trigger)
 
-    return JSONResponse(content={"success": True, "trigger": trigger})
+    return JSONResponse(content={"success": True, "trigger": trigger, "event_id": event_id})
 
 
 @router.get("/triggers", dependencies=[Depends(require_role("reader"))])
@@ -360,6 +476,7 @@ def list_triggers(request: Request):
 
 @router.delete("/triggers/{trigger_id}", dependencies=[Depends(require_role("admin"))])
 def delete_trigger(request: Request, trigger_id: str):
+    _ensure_write_allowed(request)
     tenant_id = resolve_tenant(request)
     store: dict[str, dict[str, Any]] = request.app.state.headless_triggers
     current = store.get(trigger_id)
@@ -367,12 +484,14 @@ def delete_trigger(request: Request, trigger_id: str):
         raise HTTPException(status_code=404, detail="Trigger not found")
 
     removed = store.pop(trigger_id)
-    request.app.state.sse_client.publish("triggers/delete", removed)
-    return JSONResponse(content={"success": True})
+    _persist_triggers(request)
+    event_id = request.app.state.reliable_delivery.emit("triggers/delete", removed)
+    return JSONResponse(content={"success": True, "event_id": event_id})
 
 
 @router.post("/cameras/{camera_id}/regions/upsert", dependencies=[Depends(require_role("admin"))])
 def upsert_region(request: Request, camera_id: str, body: RegionModel):
+    _ensure_write_allowed(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
     if tenant_id != body.tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
@@ -382,6 +501,7 @@ def upsert_region(request: Request, camera_id: str, body: RegionModel):
     region_store: dict[str, dict[str, Any]] = request.app.state.headless_regions
     region = body.model_dump(mode="json")
     region_store[f"{tenant_id}:{camera_id}:{body.id}"] = region
+    _persist_regions(request)
 
     # Optional hot reload: if polygon, map region to zone coordinates.
     if camera_id in request.app.frigate_config.cameras and body.shape.type == "polygon" and body.shape.points:
@@ -399,8 +519,8 @@ def upsert_region(request: Request, camera_id: str, body: RegionModel):
             zones,
         )
 
-    request.app.state.sse_client.publish("regions/upsert", region)
-    return JSONResponse(content={"success": True, "region": region})
+    event_id = request.app.state.reliable_delivery.emit("regions/upsert", region)
+    return JSONResponse(content={"success": True, "region": region, "event_id": event_id})
 
 
 @router.get("/cameras/{camera_id}/regions", dependencies=[Depends(require_role("reader"))])
@@ -417,6 +537,7 @@ def list_regions(request: Request, camera_id: str):
 
 @router.delete("/cameras/{camera_id}/regions/{region_id}", dependencies=[Depends(require_role("admin"))])
 def delete_region(request: Request, camera_id: str, region_id: str):
+    _ensure_write_allowed(request)
     tenant_id = resolve_tenant(request)
     region_store: dict[str, dict[str, Any]] = request.app.state.headless_regions
     key = f"{tenant_id}:{camera_id}:{region_id}"
@@ -424,8 +545,9 @@ def delete_region(request: Request, camera_id: str, region_id: str):
         raise HTTPException(status_code=404, detail="Region not found")
 
     removed = region_store.pop(key)
-    request.app.state.sse_client.publish("regions/delete", removed)
-    return JSONResponse(content={"success": True})
+    _persist_regions(request)
+    event_id = request.app.state.reliable_delivery.emit("regions/delete", removed)
+    return JSONResponse(content={"success": True, "event_id": event_id})
 
 
 @router.get("/events/stream", dependencies=[Depends(require_role("reader"))])
@@ -453,6 +575,11 @@ def events_stream(request: Request):
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
+@router.get("/events/delivery/status", dependencies=[Depends(require_role("reader"))])
+def events_delivery_status(request: Request):
+    return JSONResponse(content=request.app.state.reliable_delivery.snapshot())
+
+
 @router.get("/noise/suggestions", dependencies=[Depends(require_role("reader"))])
 def noise_suggestions(request: Request):
     tenant_id = resolve_tenant(request)
@@ -475,6 +602,7 @@ def noise_suggestions(request: Request):
 def noise_suggestion_approve(
     request: Request, suggestion_id: str, body: SuggestionApproveRequest
 ):
+    _ensure_write_allowed(request)
     tenant_id = resolve_tenant(request, body.tenant_id)
     store: dict[str, dict[str, Any]] = request.app.state.headless_noise_suggestions
     suggestion = store.get(suggestion_id)
@@ -499,6 +627,7 @@ def noise_suggestion_approve(
 
     try:
         runtime_store.apply_runtime_patch(patch)
+        _persist_runtime_overlay(request, tenant_id)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -569,6 +698,8 @@ def optimization_loop_status(request: Request):
 
 @router.post("/optimization/loop/control", dependencies=[Depends(require_role("admin"))])
 def optimization_loop_control(request: Request, body: ClosedLoopControlRequest):
+    _ensure_write_allowed(request)
+    resolve_tenant(request)
     state: dict[str, Any] = request.app.state.headless_closed_loop
     if body.enabled is not None:
         state["enabled"] = body.enabled
@@ -593,6 +724,8 @@ def governance_policy(request: Request):
 
 @router.post("/governance/policy", dependencies=[Depends(require_role("admin"))])
 def governance_policy_update(request: Request, body: GovernancePolicyRequest):
+    _ensure_write_allowed(request)
+    resolve_tenant(request)
     state: dict[str, Any] = request.app.state.headless_governance
     if body.policy_version is not None:
         state["policy_version"] = body.policy_version
@@ -625,6 +758,8 @@ def governance_recalibration_schedule(request: Request):
 def governance_recalibration_schedule_upsert(
     request: Request, body: RecalibrationScheduleRequest
 ):
+    _ensure_write_allowed(request)
+    resolve_tenant(request)
     state: dict[str, Any] = request.app.state.headless_governance
     schedule: dict[str, Any] = state.setdefault("recalibration_schedule", {})
     schedule[body.segment] = body.model_dump(mode="json")
@@ -642,6 +777,93 @@ def governance_scorecard(request: Request, period: str | None = None):
     return JSONResponse(content=scorecard)
 
 
+@router.get("/security/audit", dependencies=[Depends(require_role("reader"))])
+def security_audit(request: Request, limit: int = 100):
+    entries: list[dict[str, Any]] = request.app.state.headless_security_audit
+    db_entries = request.app.state.headless_db_adapter.list_audit("security", limit=limit)
+    if db_entries:
+        entries = db_entries
+    safe_limit = max(1, min(500, int(limit)))
+    return JSONResponse(content={"items": entries[-safe_limit:]})
+
+
+@router.post("/resilience/chaos/inject", dependencies=[Depends(require_role("admin"))])
+def resilience_chaos_inject(request: Request, body: ChaosInjectionRequest):
+    _ensure_write_allowed(request)
+    resolve_tenant(request)
+    state: dict[str, Any] = request.app.state.headless_self_healing
+    event = register_chaos_event(state, body.scenario)
+
+    if body.scenario == "delivery_worker_restart":
+        request.app.state.reliable_delivery.process_due()
+    elif body.scenario == "simulate_webhook_failure":
+        request.app.state.reliable_delivery.emit(
+            "chaos/webhook",
+            {"scenario": body.scenario, "ts": int(time.time())},
+            event_id=f"chaos-{int(time.time())}",
+        )
+    elif body.scenario == "simulate_backpressure":
+        request.app.state.storage_sync.enqueue_replication(
+            tenant_id="default",
+            key=f"chaos/backpressure-{int(time.time())}.json",
+            payload={"scenario": body.scenario},
+        )
+
+    _self_heal_if_needed(request, reason=f"chaos:{body.scenario}")
+    return JSONResponse(content={"success": True, "event": event, "self_healing": state})
+
+
+@router.get("/resilience/self-healing/status", dependencies=[Depends(require_role("reader"))])
+def resilience_self_healing_status(request: Request):
+    return JSONResponse(content=request.app.state.headless_self_healing)
+
+
+@router.get("/resilience/observability/slo", dependencies=[Depends(require_role("reader"))])
+def resilience_observability_slo(request: Request):
+    readiness = _compute_readiness(request)
+    snapshot = build_observability_snapshot(
+        readiness=readiness,
+        delivery_status=request.app.state.reliable_delivery.snapshot(),
+        rate_limit_audit=request.app.state.headless_security_audit,
+        storage_sync=request.app.state.storage_sync.status(),
+    )
+    return JSONResponse(content=snapshot)
+
+
+@router.get("/resilience/release-gate", dependencies=[Depends(require_role("reader"))])
+def resilience_release_gate(request: Request):
+    readiness = _compute_readiness(request)
+    snapshot = build_observability_snapshot(
+        readiness=readiness,
+        delivery_status=request.app.state.reliable_delivery.snapshot(),
+        rate_limit_audit=request.app.state.headless_security_audit,
+        storage_sync=request.app.state.storage_sync.status(),
+    )
+    return JSONResponse(content=evaluate_release_gate(snapshot))
+
+
+@router.post("/resilience/storage/config", dependencies=[Depends(require_role("admin"))])
+def resilience_storage_config(request: Request, body: StorageConfigRequest):
+    _ensure_write_allowed(request)
+    tenant_id = resolve_tenant(request, body.tenant_id)
+    item = request.app.state.storage_sync.update_storage_config(
+        tenant_id,
+        {
+            "provider": body.provider,
+            "bucket": body.bucket,
+            "region": body.region,
+            "endpoint": body.endpoint,
+            "prefix": body.prefix,
+        },
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/resilience/storage/sync/status", dependencies=[Depends(require_role("reader"))])
+def resilience_storage_sync_status(request: Request):
+    return JSONResponse(content=request.app.state.storage_sync.status())
+
+
 @ops_router.get("/healthz")
 def healthz():
     return JSONResponse(content={"status": "ok"})
@@ -649,13 +871,20 @@ def healthz():
 
 @ops_router.get("/readyz")
 def readyz(request: Request):
-    return JSONResponse(
-        content={
-            "ready": True,
-            "cameras": len(request.app.frigate_config.cameras),
-            "detectors": len(request.app.frigate_config.detectors),
-        }
-    )
+    readiness = _compute_readiness(request)
+    payload = {
+        "ready": readiness.get("ready", False),
+        "mode": readiness.get("mode", "not_ready"),
+        "write_critical_allowed": readiness.get("write_critical_allowed", False),
+        "reasons": readiness.get("reasons", []),
+        "warnings": readiness.get("warnings", []),
+        "checks": readiness.get("checks", {}),
+        "cameras": len(request.app.frigate_config.cameras),
+        "detectors": len(request.app.frigate_config.detectors),
+    }
+    if readiness.get("ready"):
+        return JSONResponse(content=payload, status_code=200)
+    return JSONResponse(content=payload, status_code=503)
 
 
 @ops_router.get("/metrics", dependencies=[Depends(require_role("reader"))])

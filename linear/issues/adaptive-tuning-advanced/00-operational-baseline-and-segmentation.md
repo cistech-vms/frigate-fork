@@ -1,11 +1,5 @@
 # Fase 00 - Baseline Operacional e Segmentacao
 
-## Metadados para Linear
-- Trilha/Epic sugerido: Adaptive Tuning Advanced
-- Prioridade sugerida: P1
-- Labels sugeridas: adaptive-tuning,noise-reduction,runtime,phase-00
-- Dependencia: Sem dependencia
-- Documento de origem: docs/adaptive-tuning-advanced/phase-00-operational-baseline-and-segmentation.md
 
 ## Contexto do projeto atual
 - Caminho critico de video/inferencia em `frigate/video.py`, `frigate/detectors/*`, `frigate/track/*`.

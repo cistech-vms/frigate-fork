@@ -37,3 +37,15 @@ Object storage não substitui estado transacional do runtime; ele cobre mídia e
 
 ## Próximos passos
 Na fase seguinte eu consolido regras de consistência, reenvio e reconciliação para mudanças de configuração em tempo real.
+
+## Implementação aplicada
+- Contrato `ObjectStorageAdapter` com `local`, `s3` e `r2` (S3-compatible).
+- Fallback local automático quando cloud storage estiver indisponível.
+- Arquivamento de dead-letter de eventos em pipeline assíncrono de replicação.
+
+## Configuração principal
+- `FRIGATE_STORAGE_PROVIDER`
+- `FRIGATE_STORAGE_BUCKET`
+- `FRIGATE_STORAGE_REGION`
+- `FRIGATE_STORAGE_ENDPOINT`
+- `FRIGATE_STORAGE_PREFIX`

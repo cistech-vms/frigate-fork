@@ -194,6 +194,18 @@ class RuntimeConfigStore:
             self.runtime_overlay = {}
             self.canary_run = None
 
+    def replace_runtime_overlay(self, runtime_overlay: dict[str, Any]) -> "FrigateConfig":
+        with self.lock:
+            from frigate.config import FrigateConfig
+
+            base = self.base_config.model_dump(
+                mode="json", warnings="none", exclude_none=True
+            )
+            candidate_dict = deep_merge(deep_merge(base, self.env_overlay), runtime_overlay)
+            candidate = FrigateConfig.model_validate(candidate_dict)
+            self.runtime_overlay = copy.deepcopy(runtime_overlay)
+            return candidate
+
     def start_canary(
         self,
         runtime_patch: dict[str, Any],

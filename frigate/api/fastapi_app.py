@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 import uuid
 from typing import Optional
@@ -17,8 +18,16 @@ from frigate.config.camera.updater import CameraConfigUpdatePublisher
 from frigate.embeddings import EmbeddingsContext
 from frigate.headless.runtime_config import init_runtime_store
 from frigate.headless.closed_loop import init_closed_loop_state
+from frigate.headless.db_adapter import build_database_adapter
 from frigate.headless.governance import init_governance_state
-from frigate.headless.security import SimpleRateLimiter
+from frigate.headless.object_storage import build_object_storage_adapter
+from frigate.headless.readiness import evaluate_readiness
+from frigate.headless.rate_limit import DistributedRateLimiter
+from frigate.headless.redis_adapter import build_redis_adapter
+from frigate.headless.reliable_delivery import ReliableEventDelivery
+from frigate.headless.self_healing import init_self_healing_state
+from frigate.headless.state_persistence import get_headless_state_store
+from frigate.headless.storage_sync import StorageSyncManager
 from frigate.headless.settings import get_headless_settings
 from frigate.ptz.onvif import OnvifController
 from frigate.stats.emitter import StatsEmitter
@@ -96,8 +105,16 @@ def create_fastapi_app(
     @app.on_event("startup")
     async def startup():
         logger.info("FastAPI headless started")
+        app.state.reliable_delivery.start()
+        app.state.storage_sync.start()
+
+    @app.on_event("shutdown")
+    async def shutdown():
+        app.state.reliable_delivery.stop()
+        app.state.storage_sync.stop()
 
     app.frigate_config = frigate_config
+    app.database = database
     app.embeddings = embeddings
     app.detected_frames_processor = detected_frames_processor
     app.storage_maintainer = storage_maintainer
@@ -109,17 +126,64 @@ def create_fastapi_app(
 
     app.state.runtime_config_store = init_runtime_store(frigate_config)
     app.state.headless_settings = headless_settings
-    app.state.headless_rate_limiter = SimpleRateLimiter(
-        headless_settings.rate_limit_per_minute
+    app.state.headless_state_store = get_headless_state_store()
+    app.state.headless_db_adapter = build_database_adapter()
+    app.state.headless_redis_adapter = build_redis_adapter()
+    app.state.headless_object_storage = build_object_storage_adapter()
+    app.state.headless_rate_limiter = DistributedRateLimiter(
+        limit_per_minute=headless_settings.rate_limit_per_minute,
+        block_base_sec=headless_settings.rate_limit_block_base_sec,
+        block_max_sec=headless_settings.rate_limit_block_max_sec,
+        state_path=os.getenv(
+            "FRIGATE_RATE_LIMIT_STATE_PATH", "/config/headless_rate_limit.json"
+        ),
+        redis_adapter=app.state.headless_redis_adapter,
     )
-    app.state.headless_triggers = {}
-    app.state.headless_regions = {}
+    app.state.headless_security_audit = []
+    persisted_state = app.state.headless_state_store.load()
+    app.state.headless_triggers = persisted_state.get("triggers", {})
+    app.state.headless_regions = persisted_state.get("regions", {})
+    selected_tenant, runtime_overlay = app.state.headless_state_store.choose_runtime_overlay(
+        headless_settings.tenant_id
+    )
+    app.state.headless_runtime_tenant = selected_tenant
+    if runtime_overlay:
+        try:
+            app.state.runtime_config_store.replace_runtime_overlay(runtime_overlay)
+        except Exception:
+            logger.exception("Failed to restore persisted runtime overlay; starting with empty overlay")
     app.state.headless_noise_suggestions = {}
     app.state.headless_noise_audit = []
     app.state.headless_closed_loop = init_closed_loop_state()
+    app.state.headless_self_healing = init_self_healing_state()
     app.state.headless_governance = init_governance_state()
     app.state.headless_started_at = time.time()
     app.state.sse_client = sse_client
+    app.state.storage_sync = StorageSyncManager(
+        state_store=app.state.headless_state_store,
+        object_storage=app.state.headless_object_storage,
+    )
+    app.state.reliable_delivery = ReliableEventDelivery(
+        sse_client=sse_client,
+        state_store=app.state.headless_state_store,
+        storage_sync_manager=app.state.storage_sync,
+        webhook_url=os.getenv("FRIGATE_HEADLESS_EVENTS_WEBHOOK_URL"),
+        max_attempts=int(os.getenv("FRIGATE_EVENT_DELIVERY_MAX_ATTEMPTS", "5")),
+        backoff_base_sec=float(os.getenv("FRIGATE_EVENT_DELIVERY_BACKOFF_BASE_SEC", "1.0")),
+        backoff_max_sec=float(os.getenv("FRIGATE_EVENT_DELIVERY_BACKOFF_MAX_SEC", "30.0")),
+        jitter_ratio=float(os.getenv("FRIGATE_EVENT_DELIVERY_JITTER_RATIO", "0.2")),
+    )
+    app.state.headless_readiness = evaluate_readiness(
+        stats=stats_emitter.get_latest_stats(),
+        db_connected=not database.is_closed(),
+        sse_health=sse_client.stream_health(),
+        canary_status={"status": "idle"},
+        started_at=app.state.headless_started_at,
+        warmup_sec=headless_settings.readiness_warmup_sec,
+        min_process_fps=headless_settings.readiness_min_process_fps,
+        max_skipped_process_ratio=headless_settings.readiness_max_skipped_process_ratio,
+        max_sse_fill_ratio=headless_settings.readiness_max_sse_fill_ratio,
+    )
 
     app.include_router(headless.ops_router)
     app.include_router(headless.router)

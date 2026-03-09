@@ -22,3 +22,12 @@ Sem observabilidade madura, a detecção precoce de degradação ainda fica limi
 
 ## Próximos passos
 Eu consolido métricas, alertas e SLO na Fase 07.
+
+## Implementação aplicada
+- Estado de self-healing com cooldown, histórico de incidentes e recuperação automática.
+- Endpoint de injeção de caos controlado para simular falhas operacionais.
+- Rotina de auto-recuperação acionada em degradação/not-ready para drenar filas e reduzir MTTR.
+
+## Evidência de operação
+- `POST /v1/resilience/chaos/inject`
+- `GET /v1/resilience/self-healing/status`

@@ -22,3 +22,11 @@ Ainda preciso consolidar gate final de release com matriz de testes obrigatório
 
 ## Próximos passos
 Eu implemento critérios formais de promoção em ambiente na Fase 08.
+
+## Implementação aplicada
+- Snapshot unificado de observabilidade com backlog, falhas de webhook, rejeições de rate limit e sync de storage.
+- SLOs sintéticos calculados no runtime para operação edge-first de baixo custo.
+- Guardrails de capacidade integrados ao fluxo de readiness e decisão operacional.
+
+## Evidência de operação
+- `GET /v1/resilience/observability/slo`

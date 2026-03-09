@@ -26,3 +26,11 @@ Mesmo com adapter, cada banco possui diferenças de tuning, isolamento e lock qu
 
 ## Próximos passos
 Na sequência eu adiciono a camada Redis para reduzir fricção em cache, coordenação e throughput.
+
+## Implementação aplicada
+- Contrato `DatabaseAdapter` para trilhas de auditoria de resiliência.
+- Fábrica por `FRIGATE_DB_DRIVER` com adapters `sqlite/mysql/postgresql`.
+- Persistência de auditoria de segurança desacoplada do core de autenticação.
+
+## Evidência de operação
+- Fluxo de auditoria em `GET /v1/security/audit`.

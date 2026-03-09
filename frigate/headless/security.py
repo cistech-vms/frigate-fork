@@ -5,13 +5,13 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from threading import Lock
 from typing import Any
 
 from fastapi import HTTPException, Request
 from joserfc import jwt
 from joserfc.jwk import OctKey
 
+from .rate_limit import DistributedRateLimiter
 from .settings import HeadlessSettings
 
 logger = logging.getLogger(__name__)
@@ -24,21 +24,43 @@ class Principal:
     tenant_id: str | None
 
 
-class SimpleRateLimiter:
-    def __init__(self, limit_per_minute: int) -> None:
-        self.limit_per_minute = max(1, limit_per_minute)
-        self._buckets: dict[str, tuple[int, int]] = {}
-        self._lock = Lock()
+def _is_critical_route(request: Request) -> bool:
+    method = request.method.upper()
+    path = request.url.path
+    if method in {"POST", "PUT", "PATCH", "DELETE"}:
+        return True
+    critical_prefixes = (
+        "/v1/config",
+        "/v1/triggers",
+        "/v1/cameras",
+        "/v1/noise",
+        "/v1/optimization",
+        "/v1/governance",
+    )
+    return path.startswith(critical_prefixes)
 
-    def allow(self, key: str) -> bool:
-        now_minute = int(time.time() // 60)
-        with self._lock:
-            minute, count = self._buckets.get(key, (now_minute, 0))
-            if minute != now_minute:
-                minute, count = now_minute, 0
-            count += 1
-            self._buckets[key] = (minute, count)
-            return count <= self.limit_per_minute
+
+def _rate_limit_key(
+    request: Request, settings: HeadlessSettings, principal: Principal
+) -> str:
+    tenant = (
+        settings.tenant_id
+        or principal.tenant_id
+        or request.headers.get("x-tenant-id")
+        or "unknown"
+    )
+    route_scope = "critical" if _is_critical_route(request) else "standard"
+    return f"tenant:{tenant}|principal:{principal.subject}|route:{route_scope}:{request.method.upper()}:{request.url.path}"
+
+
+def _append_security_audit(request: Request, entry: dict[str, Any]) -> None:
+    entries: list[dict[str, Any]] = request.app.state.headless_security_audit
+    entries.append(entry)
+    request.app.state.headless_security_audit = entries[-500:]
+    try:
+        request.app.state.headless_db_adapter.append_audit("security", entry)
+    except Exception:
+        pass
 
 
 def _load_hmac_keys() -> dict[str, dict[str, str]]:
@@ -72,6 +94,8 @@ def _verify_hmac(request: Request, settings: HeadlessSettings) -> Principal:
         raise HTTPException(status_code=401, detail="Timestamp outside allowed skew")
 
     keys = _load_hmac_keys()
+    if not keys:
+        raise HTTPException(status_code=503, detail="Authentication is not configured")
     key_config = keys.get(key_id)
     if not key_config:
         raise HTTPException(status_code=401, detail="Invalid key id")
@@ -97,7 +121,7 @@ def _verify_jwt(request: Request) -> Principal:
     token = auth.replace("Bearer ", "", 1).strip()
     secret = os.getenv("FRIGATE_API_JWT_SECRET", "")
     if not secret:
-        raise HTTPException(status_code=500, detail="JWT secret not configured")
+        raise HTTPException(status_code=503, detail="Authentication is not configured")
 
     jwt_key = OctKey.import_key(secret.encode("utf-8"))
 
@@ -121,13 +145,7 @@ def require_role(role: str):
 
     async def checker(request: Request) -> Principal:
         settings: HeadlessSettings = request.app.state.headless_settings
-        limiter: SimpleRateLimiter = request.app.state.headless_rate_limiter
-
-        remote = request.client.host if request.client else "unknown"
-        auth_hint = request.headers.get("x-key-id") or request.headers.get("authorization", remote)
-
-        if not limiter.allow(f"{remote}:{auth_hint}"):
-            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        limiter: DistributedRateLimiter = request.app.state.headless_rate_limiter
 
         mode = settings.auth_mode
         if mode == "hmac":
@@ -135,7 +153,32 @@ def require_role(role: str):
         elif mode == "jwt":
             principal = _verify_jwt(request)
         else:
-            principal = Principal(subject="anonymous", role="admin", tenant_id=settings.tenant_id)
+            raise HTTPException(status_code=503, detail="Authentication mode is invalid")
+
+        decision = limiter.allow(_rate_limit_key(request, settings, principal))
+        if not decision.allowed:
+            _append_security_audit(
+                request,
+                {
+                    "ts": int(time.time()),
+                    "event": "rate_limit_rejected",
+                    "reason": decision.reason,
+                    "retry_after_sec": decision.retry_after_sec,
+                    "blocked_until": decision.blocked_until,
+                    "key": decision.key,
+                    "path": request.url.path,
+                    "method": request.method.upper(),
+                    "principal": principal.subject,
+                },
+            )
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "Rate limit exceeded",
+                    "reason": decision.reason,
+                    "retry_after_sec": decision.retry_after_sec,
+                },
+            )
 
         if role_order.get(principal.role, -1) < role_order.get(role, 99):
             raise HTTPException(status_code=403, detail="Insufficient role")

@@ -26,6 +26,24 @@ class SseEventClient(Communicator):
         with self._lock:
             self._subscribers = [item for item in self._subscribers if item is not q]
 
+    def stream_health(self) -> dict[str, float | int]:
+        with self._lock:
+            subscribers = list(self._subscribers)
+
+        if not subscribers:
+            return {"subscribers": 0, "max_fill_ratio": 0.0}
+
+        max_ratio = 0.0
+        for item in subscribers:
+            max_size = float(item.maxsize or 0)
+            if max_size <= 0:
+                continue
+            ratio = min(1.0, float(item.qsize()) / max_size)
+            if ratio > max_ratio:
+                max_ratio = ratio
+
+        return {"subscribers": len(subscribers), "max_fill_ratio": round(max_ratio, 4)}
+
     def publish(self, topic: str, payload: Any, retain: bool = False) -> None:
         del retain
         event = {"topic": topic, "payload": payload}

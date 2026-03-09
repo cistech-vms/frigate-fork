@@ -1,12 +1,5 @@
 # Fase 02 - Threshold e Cooldown Adaptativos
 
-## Metadados para Linear
-- Trilha/Epic sugerido: Adaptive Tuning Advanced
-- Prioridade sugerida: P1
-- Labels sugeridas: adaptive-tuning,noise-reduction,runtime,phase-02
-- Dependencia: Depende da fase anterior da mesma trilha
-- Documento de origem: docs/adaptive-tuning-advanced/phase-02-adaptive-threshold-and-cooldown.md
-
 ## Contexto do projeto atual
 - Caminho critico de video/inferencia em `frigate/video.py`, `frigate/detectors/*`, `frigate/track/*`.
 - Regras/eventos em `frigate/events/*` e `frigate/api/headless.py`.

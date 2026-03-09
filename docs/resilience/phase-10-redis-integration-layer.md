@@ -26,3 +26,12 @@ Redis não substitui persistência definitiva; ele complementa o banco transacio
 
 ## Próximos passos
 Após esta fase, eu consolido benchmark de ganho real por cenário (single-node, multi-node e pico de eventos).
+
+## Implementação aplicada
+- `RedisAdapter` opcional por `FRIGATE_REDIS_ENABLED`.
+- Integração do limiter distribuído com caminho Redis e fallback seguro para arquivo/local.
+- Persistência coordenada mantendo operação estável mesmo sem Redis disponível.
+
+## Configuração principal
+- `FRIGATE_REDIS_ENABLED`
+- `FRIGATE_REDIS_URL`
