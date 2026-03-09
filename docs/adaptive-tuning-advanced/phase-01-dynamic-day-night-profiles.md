@@ -26,3 +26,8 @@ flowchart LR
 
 ## Proximos passos
 Eu aplico thresholds e cooldown adaptativos na Fase 02.
+
+## Implementacao aplicada
+- Perfis `day_profile` e `night_profile` por camera em `POST /v1/adaptive/profiles/day-night/upsert`.
+- Avaliacao e comutacao automatica por horario em `POST /v1/adaptive/profiles/day-night/evaluate`.
+- Auditoria de troca de perfil no estado adaptativo.

@@ -28,3 +28,8 @@ flowchart TD
 
 ## Proximos passos
 Eu implemento frame skip adaptativo e shedding na Fase 03.
+
+## Implementacao aplicada
+- Regras adaptativas por camera/classe em `POST /v1/adaptive/rules/upsert`.
+- Ajuste dinamico de `threshold` e `cooldown` por taxa de repeticao em `POST /v1/adaptive/rules/evaluate`.
+- Guardrails de limite minimo/maximo para evitar ajustes fora da politica.

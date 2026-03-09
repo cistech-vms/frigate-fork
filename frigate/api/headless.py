@@ -258,6 +258,47 @@ class OptimizationBenchmarkRequest(BaseModel):
     chaos_scenario: str | None = None
 
 
+class AdaptiveSegmentClassifyRequest(BaseModel):
+    camera_id: str
+    segment: Literal["indoor", "outdoor", "baixa_luz", "alto_movimento", "unclassified"]
+
+
+class AdaptiveSegmentLimitsRequest(BaseModel):
+    segment: Literal["indoor", "outdoor", "baixa_luz", "alto_movimento", "unclassified"]
+    limits: dict[str, float] = Field(default_factory=dict)
+
+
+class AdaptiveDayNightProfileRequest(BaseModel):
+    camera_id: str
+    day_profile: dict[str, Any] = Field(default_factory=dict)
+    night_profile: dict[str, Any] = Field(default_factory=dict)
+    day_start: str = "06:00"
+    night_start: str = "18:00"
+
+
+class AdaptiveDayNightEvaluateRequest(BaseModel):
+    camera_id: str
+    now_hhmm: str | None = None
+
+
+class AdaptiveRuleUpsertRequest(BaseModel):
+    camera_id: str
+    label: str
+    min_threshold: float = Field(ge=0.0, le=1.0)
+    max_threshold: float = Field(ge=0.0, le=1.0)
+    min_cooldown: int = Field(ge=0, le=3600)
+    max_cooldown: int = Field(ge=0, le=3600)
+    current_threshold: float = Field(ge=0.0, le=1.0)
+    current_cooldown: int = Field(ge=0, le=3600)
+
+
+class AdaptiveRuleEvaluateRequest(BaseModel):
+    camera_id: str
+    label: str
+    repeat_rate: float = Field(ge=0.0)
+    is_critical: bool = False
+
+
 def _apply_zones_hot_reload(request: Request, patch: dict[str, Any]) -> None:
     cameras_patch = patch.get("cameras", {}) if isinstance(patch, dict) else {}
     for camera_name, camera_patch in cameras_patch.items():
@@ -1511,6 +1552,110 @@ def optimization_perf_weekly_report(request: Request):
 @router.get("/optimization/perf/status", dependencies=[Depends(require_role("reader"))])
 def optimization_perf_status(request: Request):
     return JSONResponse(content=request.app.state.headless_optimization.snapshot())
+
+
+@router.post("/adaptive/segments/classify", dependencies=[Depends(require_role("admin"))])
+def adaptive_segments_classify(request: Request, body: AdaptiveSegmentClassifyRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_adaptive_tuning.classify_camera(
+        body.camera_id, body.segment
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/adaptive/segments/limits", dependencies=[Depends(require_role("admin"))])
+def adaptive_segments_limits(request: Request, body: AdaptiveSegmentLimitsRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_adaptive_tuning.set_segment_limits(
+        body.segment, body.limits
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/adaptive/segments/baseline/capture", dependencies=[Depends(require_role("admin"))])
+def adaptive_segments_baseline_capture(request: Request):
+    _ensure_write_allowed(request)
+    stats = request.app.stats_emitter.get_latest_stats()
+    item = request.app.state.headless_adaptive_tuning.capture_baseline(stats)
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/adaptive/segments/status", dependencies=[Depends(require_role("reader"))])
+def adaptive_segments_status(request: Request):
+    state = request.app.state.headless_adaptive_tuning.snapshot()
+    return JSONResponse(
+        content={
+            "segments": state.get("segments", {}),
+            "baseline": state.get("segment_baseline", {}),
+            "limits": state.get("segment_limits", {}),
+            "health_scores": state.get("health_scores", {}),
+        }
+    )
+
+
+@router.post("/adaptive/profiles/day-night/upsert", dependencies=[Depends(require_role("admin"))])
+def adaptive_profiles_day_night_upsert(
+    request: Request, body: AdaptiveDayNightProfileRequest
+):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_adaptive_tuning.upsert_day_night_profile(
+        body.camera_id,
+        day_profile=body.day_profile,
+        night_profile=body.night_profile,
+        day_start=body.day_start,
+        night_start=body.night_start,
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/adaptive/profiles/day-night/evaluate", dependencies=[Depends(require_role("admin"))])
+def adaptive_profiles_day_night_evaluate(
+    request: Request, body: AdaptiveDayNightEvaluateRequest
+):
+    _ensure_write_allowed(request)
+    try:
+        item = request.app.state.headless_adaptive_tuning.evaluate_day_night(
+            body.camera_id, now_hhmm=body.now_hhmm
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/adaptive/rules/upsert", dependencies=[Depends(require_role("admin"))])
+def adaptive_rules_upsert(request: Request, body: AdaptiveRuleUpsertRequest):
+    _ensure_write_allowed(request)
+    item = request.app.state.headless_adaptive_tuning.upsert_adaptive_rule(
+        camera_id=body.camera_id,
+        label=body.label,
+        min_threshold=body.min_threshold,
+        max_threshold=body.max_threshold,
+        min_cooldown=body.min_cooldown,
+        max_cooldown=body.max_cooldown,
+        current_threshold=body.current_threshold,
+        current_cooldown=body.current_cooldown,
+    )
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.post("/adaptive/rules/evaluate", dependencies=[Depends(require_role("admin"))])
+def adaptive_rules_evaluate(request: Request, body: AdaptiveRuleEvaluateRequest):
+    _ensure_write_allowed(request)
+    try:
+        item = request.app.state.headless_adaptive_tuning.evaluate_rule(
+            body.camera_id,
+            body.label,
+            repeat_rate=body.repeat_rate,
+            is_critical=body.is_critical,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse(content={"success": True, "item": item})
+
+
+@router.get("/adaptive/status", dependencies=[Depends(require_role("reader"))])
+def adaptive_status(request: Request):
+    return JSONResponse(content=request.app.state.headless_adaptive_tuning.snapshot())
 
 
 @ops_router.get("/healthz")

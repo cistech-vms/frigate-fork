@@ -25,3 +25,9 @@ flowchart TD
 
 ## Proximos passos
 Eu ativo perfis dinamicos dia/noite na Fase 01.
+
+## Implementacao aplicada
+- Segmentacao de camera por ambiente em `POST /v1/adaptive/segments/classify`.
+- Captura de baseline por segmento com metricas de processo/fila/drop em `POST /v1/adaptive/segments/baseline/capture`.
+- Limites operacionais por segmento em `POST /v1/adaptive/segments/limits`.
+- Score inicial de saude por camera derivado de baseline segmentado.
