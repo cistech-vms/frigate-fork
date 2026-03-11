@@ -32,3 +32,14 @@ Fechar gaps técnicos e operacionais com gates objetivos para promoção segura 
 - status por fase (`passed`, `in_progress`, `failed`)
 - blockers e evidências por fase
 - score geral e flag `production_ready`
+
+## Validação rápida de pré-produção
+- Script de go/no-go: `scripts/headless_preprod_check.sh`
+- Exemplo sem auth (somente health/ready):
+  - `scripts/headless_preprod_check.sh --base-url http://127.0.0.1:5000`
+- Exemplo com auth reader:
+  - `scripts/headless_preprod_check.sh --base-url http://127.0.0.1:5000 -H "Authorization: Bearer <token>"`
+- Critério de liberação:
+  - `GO/NO-GO: GO`
+  - `/v1/resilience/release-gate` com `passed=true`
+  - `/v1/production/readiness` com `summary.production_ready=true`

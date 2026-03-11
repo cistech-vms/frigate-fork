@@ -4,6 +4,7 @@ COMMIT_HASH := $(shell git log -1 --pretty=format:"%h"|tail -1)
 VERSION = 0.17.0
 IMAGE_REPO ?= ghcr.io/blakeblackshear/frigate
 GITHUB_REF_NAME ?= $(shell git rev-parse --abbrev-ref HEAD)
+BASE_URL ?= http://127.0.0.1:5000
 BOARDS= #Initialized empty
 
 include docker/*/*.mk
@@ -56,4 +57,7 @@ run_tests: local
 	docker run --rm --workdir=/opt/frigate --entrypoint= frigate:latest \
 		python3 -u -m mypy --config-file frigate/mypy.ini frigate
 
-.PHONY: run_tests
+preprod_check:
+	bash scripts/headless_preprod_check.sh --base-url $(BASE_URL)
+
+.PHONY: run_tests preprod_check
