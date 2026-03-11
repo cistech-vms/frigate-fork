@@ -28,6 +28,7 @@ from frigate.headless.migrations import MigrationManager
 from frigate.headless.object_storage import build_object_storage_adapter
 from frigate.headless.optimization_engine import OptimizationEngine
 from frigate.headless.adaptive_tuning import AdaptiveTuningManager
+from frigate.headless.cms_remote import CmsRemoteManager
 from frigate.headless.readiness import evaluate_readiness
 from frigate.headless.rate_limit import DistributedRateLimiter
 from frigate.headless.redis_adapter import build_redis_adapter
@@ -118,9 +119,11 @@ def create_fastapi_app(
         logger.info("FastAPI headless started")
         app.state.reliable_delivery.start()
         app.state.storage_sync.start()
+        app.state.headless_cms_remote.start()
 
     @app.on_event("shutdown")
     async def shutdown():
+        app.state.headless_cms_remote.stop()
         app.state.reliable_delivery.stop()
         app.state.storage_sync.stop()
 
@@ -181,6 +184,15 @@ def create_fastapi_app(
     app.state.headless_closed_loop = init_closed_loop_state()
     app.state.headless_self_healing = init_self_healing_state()
     app.state.headless_governance = init_governance_state()
+    app.state.headless_cms_remote = CmsRemoteManager(
+        settings=headless_settings,
+        state_store=app.state.headless_state_store,
+        runtime_store=app.state.runtime_config_store,
+        stats_provider=stats_emitter.get_latest_stats,
+        runtime_tenant=selected_tenant,
+        node_id=os.getenv("FRIGATE_NODE_ID", "node-1"),
+        frigate_version=str(getattr(frigate_config, "version", "unknown")),
+    )
     app.state.headless_started_at = time.time()
     app.state.sse_client = sse_client
     app.state.storage_sync = StorageSyncManager(

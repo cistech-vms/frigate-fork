@@ -24,6 +24,17 @@ class HeadlessSettings:
     readiness_max_sse_fill_ratio: float
     rate_limit_block_base_sec: int
     rate_limit_block_max_sec: int
+    cms_enabled: bool
+    cms_required: bool
+    cms_url: str | None
+    cms_tenant_code: str | None
+    cms_auth_mode: str
+    cms_token: str | None
+    cms_username: str | None
+    cms_password: str | None
+    cms_sync_interval_sec: int
+    cms_request_timeout_sec: float
+    cms_license_grace_sec: int
 
 
 def get_headless_settings() -> HeadlessSettings:
@@ -32,6 +43,32 @@ def get_headless_settings() -> HeadlessSettings:
     auth_mode = os.getenv("FRIGATE_API_AUTH_MODE", "hmac").strip().lower()
     if auth_mode not in {"hmac", "jwt"}:
         raise ValueError("FRIGATE_API_AUTH_MODE must be 'hmac' or 'jwt'")
+    cms_url = (os.getenv("FRIGATE_CMS_URL", "") or "").strip() or None
+    cms_required = _parse_bool(os.getenv("FRIGATE_CMS_REQUIRED", "false"), default=False)
+    cms_enabled = bool(cms_url)
+    cms_auth_mode = (os.getenv("FRIGATE_CMS_AUTH_MODE", "token") or "").strip().lower()
+    if cms_auth_mode not in {"token", "password"}:
+        raise ValueError("FRIGATE_CMS_AUTH_MODE must be 'token' or 'password'")
+    cms_tenant_code = (os.getenv("FRIGATE_TENANT_CODE", "") or "").strip() or None
+    cms_token = (os.getenv("FRIGATE_CMS_TOKEN", "") or "").strip() or None
+    cms_username = (os.getenv("FRIGATE_CMS_USERNAME", "") or "").strip() or None
+    cms_password = (os.getenv("FRIGATE_CMS_PASSWORD", "") or "").strip() or None
+    cms_sync_interval_sec = int(os.getenv("FRIGATE_CMS_SYNC_INTERVAL_SEC", "60"))
+    cms_request_timeout_sec = float(os.getenv("FRIGATE_CMS_REQUEST_TIMEOUT_SEC", "8.0"))
+    cms_license_grace_sec = int(os.getenv("FRIGATE_CMS_LICENSE_GRACE_SEC", "900"))
+    if cms_enabled or cms_required:
+        if not cms_url:
+            raise ValueError("FRIGATE_CMS_URL is required when CMS mode is enabled/required")
+        if not cms_tenant_code:
+            raise ValueError("FRIGATE_TENANT_CODE is required when CMS mode is enabled/required")
+        if cms_auth_mode == "token" and not cms_token:
+            raise ValueError(
+                "FRIGATE_CMS_TOKEN is required when FRIGATE_CMS_AUTH_MODE=token and CMS mode is enabled/required"
+            )
+        if cms_auth_mode == "password" and (not cms_username or not cms_password):
+            raise ValueError(
+                "FRIGATE_CMS_USERNAME and FRIGATE_CMS_PASSWORD are required when FRIGATE_CMS_AUTH_MODE=password and CMS mode is enabled/required"
+            )
     return HeadlessSettings(
         # Headless is mandatory in this distribution profile.
         enabled=True,
@@ -51,6 +88,17 @@ def get_headless_settings() -> HeadlessSettings:
         ),
         rate_limit_block_base_sec=int(os.getenv("FRIGATE_API_RATE_LIMIT_BLOCK_BASE_SEC", "30")),
         rate_limit_block_max_sec=int(os.getenv("FRIGATE_API_RATE_LIMIT_BLOCK_MAX_SEC", "900")),
+        cms_enabled=cms_enabled,
+        cms_required=cms_required,
+        cms_url=cms_url,
+        cms_tenant_code=cms_tenant_code,
+        cms_auth_mode=cms_auth_mode,
+        cms_token=cms_token,
+        cms_username=cms_username,
+        cms_password=cms_password,
+        cms_sync_interval_sec=max(5, cms_sync_interval_sec),
+        cms_request_timeout_sec=max(1.0, cms_request_timeout_sec),
+        cms_license_grace_sec=max(0, cms_license_grace_sec),
     )
 
 

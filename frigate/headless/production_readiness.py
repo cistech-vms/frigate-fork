@@ -52,6 +52,7 @@ def build_production_readiness_report(context: dict[str, Any]) -> dict[str, Any]
     rate_limiter = context.get("rate_limiter", {})
     redis_enabled = bool(context.get("redis_enabled", False))
     supply_chain = context.get("supply_chain", {})
+    cms_status = context.get("cms_status", {})
 
     phase_items: list[dict[str, Any]] = []
 
@@ -355,6 +356,18 @@ def build_production_readiness_report(context: dict[str, Any]) -> dict[str, Any]
         p12_evidence.append("release_gate_passed")
     else:
         p12_blockers.append("release_gate_not_passed")
+    cms_enabled = bool(cms_status.get("enabled", False)) if isinstance(cms_status, dict) else False
+    if cms_enabled:
+        cms_connected = bool(cms_status.get("connected", False))
+        cms_license_status = str(cms_status.get("license", {}).get("status", "unknown"))
+        if cms_connected:
+            p12_evidence.append("cms_connected")
+        else:
+            p12_blockers.append("cms_disconnected")
+        if cms_license_status in {"valid", "grace"}:
+            p12_evidence.append(f"cms_license:{cms_license_status}")
+        else:
+            p12_blockers.append("cms_license_not_valid")
     phase_items.append(
         _phase(
             phase_id="12",

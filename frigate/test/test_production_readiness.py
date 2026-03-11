@@ -81,6 +81,21 @@ class TestProductionReadiness(unittest.TestCase):
         self.assertEqual(phase_05["status"], "in_progress")
         self.assertIn("redis_distributed_state_disabled", phase_05["blockers"])
 
+    def test_report_blocks_go_live_when_cms_license_invalid(self):
+        context = self._base_context()
+        context["cms_status"] = {
+            "enabled": True,
+            "connected": False,
+            "license": {"status": "invalid"},
+        }
+
+        report = build_production_readiness_report(context)
+        phase_12 = [x for x in report["phases"] if x["phase_id"] == "12"][0]
+
+        self.assertFalse(report["summary"]["production_ready"])
+        self.assertIn("cms_disconnected", phase_12["blockers"])
+        self.assertIn("cms_license_not_valid", phase_12["blockers"])
+
 
 if __name__ == "__main__":
     unittest.main()

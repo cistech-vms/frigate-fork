@@ -300,6 +300,10 @@ class AdaptiveRuleEvaluateRequest(BaseModel):
     is_critical: bool = False
 
 
+class CmsSyncRequest(BaseModel):
+    force: bool = True
+
+
 def _apply_zones_hot_reload(request: Request, patch: dict[str, Any]) -> None:
     cameras_patch = patch.get("cameras", {}) if isinstance(patch, dict) else {}
     for camera_name, camera_patch in cameras_patch.items():
@@ -355,6 +359,9 @@ def _compute_readiness(request: Request) -> dict[str, Any]:
         max_skipped_process_ratio=settings.readiness_max_skipped_process_ratio,
         max_sse_fill_ratio=settings.readiness_max_sse_fill_ratio,
     )
+    cms_remote = getattr(request.app.state, "headless_cms_remote", None)
+    if cms_remote is not None:
+        snapshot = cms_remote.enrich_readiness(snapshot)
     request.app.state.headless_readiness = snapshot
     if not snapshot.get("ready", False) or snapshot.get("mode") == "degraded_read_only":
         _self_heal_if_needed(request, reason=f"readiness:{snapshot.get('mode')}")
@@ -1117,8 +1124,26 @@ def production_readiness_report(request: Request):
         ),
         "oncall_drill_completed": bool(request.app.state.headless_dr.snapshot().get("exercises")),
         "supply_chain": request.app.state.headless_supply_chain.snapshot(),
+        "cms_status": request.app.state.headless_cms_remote.status(),
     }
     return JSONResponse(content=build_production_readiness_report(context))
+
+
+@router.get("/cms/status", dependencies=[Depends(require_role("reader"))])
+def cms_status(request: Request):
+    manager = getattr(request.app.state, "headless_cms_remote", None)
+    if manager is None:
+        return JSONResponse(content={"enabled": False, "mode": "not_initialized"})
+    return JSONResponse(content=manager.status())
+
+
+@router.post("/cms/sync", dependencies=[Depends(require_role("admin"))])
+def cms_sync(request: Request, body: CmsSyncRequest):
+    manager = getattr(request.app.state, "headless_cms_remote", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="CMS remote manager not initialized")
+    snapshot = manager.sync_once(force=body.force, reason="api")
+    return JSONResponse(content={"success": True, "status": snapshot})
 
 
 @router.post("/resilience/storage/config", dependencies=[Depends(require_role("admin"))])

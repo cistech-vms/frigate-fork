@@ -34,6 +34,33 @@ def _default_state() -> dict[str, Any]:
                 "dead_letters": [],
             },
         },
+        "cms_runtime": {
+            "edge_id": "",
+            "config_version": 0,
+            "etag": "",
+            "last_sync_ts": 0,
+            "last_error": "",
+            "license": {
+                "status": "unknown",
+                "valid": False,
+                "checked_at": 0,
+                "expires_at": 0,
+                "grace_until": 0,
+                "reason": "not_configured",
+            },
+            "auth": {
+                "mode": "",
+                "status": "not_configured",
+                "expires_at": 0,
+            },
+            "last_known_good": {
+                "runtime_patch": {},
+                "config_version": 0,
+                "etag": "",
+                "applied_at": 0,
+            },
+            "audit": [],
+        },
     }
 
 
@@ -57,6 +84,8 @@ class HeadlessStateStore:
             state["event_delivery_status"] = payload["event_delivery_status"]
         if isinstance(payload.get("storage_runtime"), dict):
             state["storage_runtime"] = payload["storage_runtime"]
+        if isinstance(payload.get("cms_runtime"), dict):
+            state["cms_runtime"] = payload["cms_runtime"]
         if isinstance(payload.get("version"), int):
             state["version"] = payload["version"]
         return state
@@ -137,6 +166,18 @@ class HeadlessStateStore:
     def put_storage_runtime(self, runtime: dict[str, Any]) -> dict[str, Any]:
         state = self.load()
         state["storage_runtime"] = runtime
+        return self.save(state)
+
+    def cms_runtime(self) -> dict[str, Any]:
+        state = self.load()
+        runtime = state.get("cms_runtime", {})
+        if isinstance(runtime, dict):
+            return runtime
+        return _default_state()["cms_runtime"]
+
+    def put_cms_runtime(self, runtime: dict[str, Any]) -> dict[str, Any]:
+        state = self.load()
+        state["cms_runtime"] = runtime
         return self.save(state)
 
 
