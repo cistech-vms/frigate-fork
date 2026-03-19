@@ -5,6 +5,7 @@ from frigate.headless.installer import (
     build_hardware_profile,
     discover_camera_candidates,
     expand_scan_targets,
+    parse_ws_discovery_match,
 )
 
 
@@ -69,6 +70,113 @@ class TestHeadlessInstaller(unittest.TestCase):
         self.assertEqual(result["summary"]["candidates_found"], 2)
         self.assertTrue(result["candidates"][0]["onvif_reachable"])
         self.assertEqual(result["candidates"][0]["source_type"], "nvr_channel")
+        self.assertIn("recommended_config", result["candidates"][0])
+
+    def test_parse_ws_discovery_match(self):
+        payload = b"""
+        <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+                    xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+                    xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery">
+          <s:Body>
+            <d:ProbeMatches>
+              <d:ProbeMatch>
+                <a:EndpointReference>
+                  <a:Address>urn:uuid:camera-1</a:Address>
+                </a:EndpointReference>
+                <d:Types>tds:Device</d:Types>
+                <d:Scopes>onvif://www.onvif.org/name/Camera01</d:Scopes>
+                <d:XAddrs>http://192.168.1.50:80/onvif/device_service</d:XAddrs>
+              </d:ProbeMatch>
+            </d:ProbeMatches>
+          </s:Body>
+        </s:Envelope>
+        """
+        parsed = parse_ws_discovery_match(payload, "192.168.1.50")
+        self.assertEqual(parsed["host"], "192.168.1.50")
+        self.assertEqual(parsed["port"], 80)
+        self.assertEqual(parsed["urn"], "urn:uuid:camera-1")
+
+    def test_discover_camera_candidates_with_fake_onvif(self):
+        def fake_port_probe(address: str, timeout: float) -> bool:
+            del timeout
+            return address in {"192.168.1.40:80"}
+
+        def fake_stream_probe(url: str, ffprobe_path: str, timeout: float):
+            del ffprobe_path, timeout
+            if "rtsp://192.168.1.40/live" in url:
+                return {
+                    "width": 2560,
+                    "height": 1440,
+                    "codec": "h265",
+                    "fps": 15.0,
+                    "has_audio": True,
+                    "audio_codec": "aac",
+                }
+            return None
+
+        def fake_onvif_discover(**kwargs):
+            del kwargs
+            return [
+                {
+                    "host": "192.168.1.40",
+                    "port": 80,
+                    "xaddr": "http://192.168.1.40:80/onvif/device_service",
+                    "xaddrs": ["http://192.168.1.40:80/onvif/device_service"],
+                    "urn": "urn:uuid:onvif-1",
+                    "scopes": ["onvif://www.onvif.org/name/NVRFront"],
+                    "types": "tds:Device",
+                    "discovery": "ws-discovery",
+                }
+            ]
+
+        def fake_onvif_device(service_url: str, username: str | None, password: str | None, timeout: float):
+            del service_url, username, password, timeout
+            return {
+                "service_url": "http://192.168.1.40:80/onvif/device_service",
+                "manufacturer": "Acme",
+                "model": "NVR-Pro",
+                "capabilities": {
+                    "media_xaddr": "http://192.168.1.40:80/onvif/media_service",
+                },
+            }
+
+        def fake_onvif_profiles(
+            service_url: str,
+            username: str | None,
+            password: str | None,
+            timeout: float,
+            metadata: dict | None = None,
+        ):
+            del service_url, username, password, timeout, metadata
+            return [
+                {
+                    "token": "profile1",
+                    "name": "MainStream",
+                    "width": 2560,
+                    "height": 1440,
+                    "rtsp_url": "rtsp://192.168.1.40/live",
+                    "source": "media",
+                }
+            ]
+
+        result = discover_camera_candidates(
+            ffprobe_path="/usr/bin/ffprobe",
+            targets=["192.168.1.40"],
+            onvif_ports=[80],
+            rtsp_ports=[],
+            port_probe=fake_port_probe,
+            stream_probe=fake_stream_probe,
+            onvif_discover_fn=fake_onvif_discover,
+            onvif_device_fn=fake_onvif_device,
+            onvif_profiles_fn=fake_onvif_profiles,
+        )
+
+        self.assertEqual(result["summary"]["onvif_devices_found"], 1)
+        self.assertEqual(result["summary"]["candidates_found"], 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["discovery_method"], "onvif")
+        self.assertEqual(candidate["onvif"]["metadata"]["model"], "NVR-Pro")
+        self.assertTrue(candidate["recommended_config"]["audio_enabled"])
 
     def test_build_camera_connection_patch_generates_go2rtc_and_cameras(self):
         patch = build_camera_connection_patch(
@@ -76,6 +184,15 @@ class TestHeadlessInstaller(unittest.TestCase):
                 {
                     "suggested_camera_name": "nvr_192_168_1_20_ch01",
                     "rtsp_url": "rtsp://admin:secret@192.168.1.20:554/Streaming/Channels/101",
+                    "recommended_config": {
+                        "detect_fps": 6,
+                        "audio_enabled": True,
+                        "hwaccel_args": "preset-vaapi",
+                        "input_preset": "preset-rtsp-generic",
+                    },
+                    "onvif": {
+                        "service_url": "http://192.168.1.20:80/onvif/device_service",
+                    },
                 },
                 {
                     "suggested_camera_name": "nvr_192_168_1_20_ch02",
@@ -93,8 +210,12 @@ class TestHeadlessInstaller(unittest.TestCase):
         first_camera = next(iter(patch["cameras"].values()))
         self.assertEqual(
             first_camera["ffmpeg"]["inputs"][0]["roles"],
-            ["record", "detect"],
+            ["record", "detect", "audio"],
         )
+        self.assertEqual(first_camera["detect"]["fps"], 6)
+        self.assertEqual(first_camera["audio"]["enabled"], True)
+        self.assertEqual(first_camera["ffmpeg"]["hwaccel_args"], "preset-vaapi")
+        self.assertEqual(first_camera["onvif"]["host"], "192.168.1.20")
 
 
 if __name__ == "__main__":

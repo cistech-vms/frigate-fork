@@ -6,19 +6,23 @@ import sys
 import threading
 from typing import Union
 
-import ruamel.yaml
-from pydantic import ValidationError
-
-from frigate.app import FrigateApp
-from frigate.config import FrigateConfig
-from frigate.headless.runtime_config import init_runtime_store
-from frigate.headless.settings import get_headless_settings
-from frigate.headless.state_persistence import get_headless_state_store
-from frigate.log import setup_logging
-from frigate.util.config import find_config_file
-
-
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "install":
+        from frigate.headless.installer_cli import main as installer_main
+
+        raise SystemExit(installer_main(sys.argv[2:]))
+
+    import ruamel.yaml
+    from pydantic import ValidationError
+
+    from frigate.app import FrigateApp
+    from frigate.config import FrigateConfig
+    from frigate.headless.runtime_config import init_runtime_store
+    from frigate.headless.settings import get_headless_settings
+    from frigate.headless.state_persistence import get_headless_state_store
+    from frigate.log import setup_logging
+    from frigate.util.config import find_config_file
+
     manager = mp.Manager()
     faulthandler.enable()
 
