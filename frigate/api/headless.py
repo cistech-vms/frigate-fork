@@ -19,8 +19,14 @@ from frigate.config.camera.updater import (
 from frigate.headless.runtime_config import (
     CanaryPolicy,
     camera_patch_update_types,
+    deep_merge,
     diff_top_level_keys,
     patch_requires_restart,
+)
+from frigate.headless.installer import (
+    build_camera_connection_patch,
+    build_hardware_profile,
+    discover_camera_candidates,
 )
 from frigate.headless.noise_intelligence import generate_noise_suggestions
 from frigate.headless.observability import (
@@ -284,6 +290,30 @@ class LoadChaosRecordRequest(BaseModel):
     recovery_sec: int = Field(ge=0)
 
 
+class InstallDiscoveryScanRequest(BaseModel):
+    targets: list[str] = Field(default_factory=lambda: ["192.168.1.0/24"])
+    username: str | None = None
+    password: str | None = None
+    rtsp_ports: list[int] = Field(default_factory=lambda: [554, 8554])
+    onvif_ports: list[int] = Field(default_factory=lambda: [80, 8000, 8080, 8899])
+    profiles: list[str] = Field(
+        default_factory=lambda: ["hikvision", "dahua", "reolink", "uniview", "generic"]
+    )
+    max_hosts: int = Field(default=256, ge=1, le=4096)
+    max_channels: int = Field(default=16, ge=1, le=128)
+    max_candidates: int = Field(default=128, ge=1, le=1024)
+    timeout_sec: float = Field(default=2.0, ge=0.5, le=15.0)
+
+
+class InstallDiscoveryConnectRequest(BaseModel):
+    tenant_id: str | None = None
+    candidate_ids: list[str] = Field(default_factory=list)
+    connect_all: bool = False
+    camera_name_prefix: str = Field(default="cam", min_length=1, max_length=32)
+    detect_enabled: bool = True
+    record_enabled: bool = True
+
+
 class ScalingPlanApplyRequest(BaseModel):
     tenant_id: str
     config_version: int = Field(ge=1)
@@ -415,6 +445,17 @@ def _runtime_tenant(request: Request, tenant_id: str | None = None) -> str:
         request.app.state.headless_runtime_tenant = tenant_id
         return tenant_id
     return str(getattr(request.app.state, "headless_runtime_tenant", "default"))
+
+
+def _ensure_installer_enabled(request: Request) -> None:
+    settings = request.app.state.headless_settings
+    if not getattr(settings, "installer_enabled", True):
+        raise HTTPException(status_code=404, detail="Installer mode disabled")
+    if len(request.app.frigate_config.cameras) > 0:
+        raise HTTPException(
+            status_code=403,
+            detail="Installer assistant is only available before cameras are configured",
+        )
 
 
 def _persist_runtime_overlay(request: Request, tenant_id: str | None = None) -> None:
@@ -1811,6 +1852,111 @@ def adaptive_rules_evaluate(request: Request, body: AdaptiveRuleEvaluateRequest)
 @router.get("/adaptive/status", dependencies=[Depends(require_role("reader"))])
 def adaptive_status(request: Request):
     return JSONResponse(content=request.app.state.headless_adaptive_tuning.snapshot())
+
+
+@ops_router.get("/install/status")
+def install_status(request: Request):
+    _ensure_installer_enabled(request)
+    installer_state = request.app.state.headless_installer
+    return JSONResponse(
+        content={
+            "enabled": True,
+            "pending_restart": bool(installer_state.get("pending_patch")),
+            "cameras_configured": len(request.app.frigate_config.cameras),
+            "last_scan_summary": installer_state.get("last_scan", {}).get("summary", {}),
+        }
+    )
+
+
+@ops_router.post("/install/hardware/profile")
+def install_hardware_profile(request: Request):
+    _ensure_installer_enabled(request)
+    profile = build_hardware_profile()
+    request.app.state.headless_installer["hardware_profile"] = profile
+    return JSONResponse(content=profile)
+
+
+@ops_router.post("/install/discovery/scan")
+def install_discovery_scan(request: Request, body: InstallDiscoveryScanRequest):
+    _ensure_installer_enabled(request)
+    result = discover_camera_candidates(
+        ffprobe_path=request.app.frigate_config.ffmpeg.ffprobe_path,
+        targets=body.targets,
+        username=body.username,
+        password=body.password,
+        rtsp_ports=body.rtsp_ports,
+        onvif_ports=body.onvif_ports,
+        profiles=body.profiles,
+        max_hosts=body.max_hosts,
+        max_channels=body.max_channels,
+        max_candidates=body.max_candidates,
+        timeout_sec=body.timeout_sec,
+    )
+    request.app.state.headless_installer["last_scan"] = result
+    return JSONResponse(content=result)
+
+
+@ops_router.get("/install/discovery/candidates")
+def install_discovery_candidates(request: Request):
+    _ensure_installer_enabled(request)
+    return JSONResponse(content=request.app.state.headless_installer.get("last_scan", {}))
+
+
+@ops_router.post("/install/discovery/connect")
+def install_discovery_connect(request: Request, body: InstallDiscoveryConnectRequest):
+    _ensure_installer_enabled(request)
+    last_scan = request.app.state.headless_installer.get("last_scan", {})
+    all_candidates = last_scan.get("candidates", []) if isinstance(last_scan, dict) else []
+    if not isinstance(all_candidates, list) or not all_candidates:
+        raise HTTPException(status_code=409, detail="No discovery results available")
+
+    selected_ids = set(body.candidate_ids)
+    if body.connect_all:
+        selected = [item for item in all_candidates if isinstance(item, dict)]
+    else:
+        selected = [
+            item
+            for item in all_candidates
+            if isinstance(item, dict) and item.get("id") in selected_ids
+        ]
+
+    if not selected:
+        raise HTTPException(status_code=422, detail="No discovery candidates were selected")
+
+    store = request.app.state.runtime_config_store
+    effective = store.effective_dict()
+    patch = build_camera_connection_patch(
+        selected_candidates=selected,
+        existing_config=effective,
+        camera_name_prefix=body.camera_name_prefix,
+        detect_enabled=body.detect_enabled,
+        record_enabled=body.record_enabled,
+    )
+    if not patch:
+        raise HTTPException(status_code=422, detail="Unable to build camera configuration patch")
+
+    merged_overlay = deep_merge(copy.deepcopy(store.runtime_overlay), patch)
+    try:
+        store.replace_runtime_overlay(merged_overlay)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    tenant = _runtime_tenant(request, body.tenant_id)
+    request.app.state.headless_state_store.put_runtime_overlay(tenant, merged_overlay)
+    request.app.state.headless_installer["pending_patch"] = patch
+
+    return JSONResponse(
+        content={
+            "staged": True,
+            "pending_restart": True,
+            "message": "Cameras descobertas foram preparadas para o proximo boot do Frigate",
+            "tenant_id": tenant,
+            "cameras": sorted(list(patch.get("cameras", {}).keys())),
+            "go2rtc_streams": sorted(
+                list(patch.get("go2rtc", {}).get("streams", {}).keys())
+            ),
+        }
+    )
 
 
 @ops_router.get("/healthz")

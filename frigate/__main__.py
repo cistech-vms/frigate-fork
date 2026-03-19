@@ -12,6 +12,8 @@ from pydantic import ValidationError
 from frigate.app import FrigateApp
 from frigate.config import FrigateConfig
 from frigate.headless.runtime_config import init_runtime_store
+from frigate.headless.settings import get_headless_settings
+from frigate.headless.state_persistence import get_headless_state_store
 from frigate.log import setup_logging
 from frigate.util.config import find_config_file
 
@@ -116,6 +118,19 @@ def main() -> None:
 
     # Apply ENV-based runtime overlay before bootstrapping the engine.
     runtime_store = init_runtime_store(config)
+    try:
+        tenant_id = get_headless_settings().tenant_id
+    except Exception:
+        tenant_id = None
+
+    persisted_overlay = {}
+    try:
+        _, persisted_overlay = get_headless_state_store().choose_runtime_overlay(tenant_id)
+    except Exception:
+        persisted_overlay = {}
+
+    if persisted_overlay:
+        config = runtime_store.replace_runtime_overlay(persisted_overlay)
     if runtime_store.env_overlay:
         config = FrigateConfig.model_validate(runtime_store.effective_dict())
 

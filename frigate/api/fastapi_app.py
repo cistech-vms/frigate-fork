@@ -184,6 +184,21 @@ def create_fastapi_app(
     app.state.headless_closed_loop = init_closed_loop_state()
     app.state.headless_self_healing = init_self_healing_state()
     app.state.headless_governance = init_governance_state()
+    app.state.headless_installer = {
+        "hardware_profile": None,
+        "last_scan": {
+            "generated_at": 0,
+            "targets_scanned": [],
+            "reachable_hosts": [],
+            "candidates": [],
+            "summary": {
+                "hosts_scanned": 0,
+                "hosts_reachable": 0,
+                "candidates_found": 0,
+            },
+        },
+        "pending_patch": {},
+    }
     app.state.headless_cms_remote = CmsRemoteManager(
         settings=headless_settings,
         state_store=app.state.headless_state_store,

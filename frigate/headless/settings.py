@@ -12,6 +12,7 @@ def _parse_bool(value: str, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class HeadlessSettings:
     enabled: bool
+    installer_enabled: bool
     auth_mode: str
     hmac_max_skew_sec: int
     rate_limit_per_minute: int
@@ -72,6 +73,9 @@ def get_headless_settings() -> HeadlessSettings:
     return HeadlessSettings(
         # Headless is mandatory in this distribution profile.
         enabled=True,
+        installer_enabled=_parse_bool(
+            os.getenv("FRIGATE_INSTALLER_ENABLED", "true"), default=True
+        ),
         auth_mode=auth_mode,
         hmac_max_skew_sec=int(os.getenv("FRIGATE_API_HMAC_MAX_SKEW_SEC", "300")),
         rate_limit_per_minute=int(os.getenv("FRIGATE_API_RATE_LIMIT_PER_MIN", "120")),
