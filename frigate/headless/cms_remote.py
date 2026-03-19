@@ -15,6 +15,7 @@ from frigate.headless.runtime_config import CanaryPolicy
 logger = logging.getLogger(__name__)
 
 TransportFn = Callable[[str, str, dict[str, str], dict[str, Any] | None, float], tuple[int, dict[str, Any], dict[str, str]]]
+HotReloadFn = Callable[[dict[str, Any], Any], Any]
 
 
 def _now() -> int:
@@ -87,6 +88,7 @@ class CmsRemoteManager:
         node_id: str,
         frigate_version: str,
         transport: TransportFn | None = None,
+        on_runtime_patch_applied: HotReloadFn | None = None,
     ) -> None:
         self.settings = settings
         self.state_store = state_store
@@ -96,6 +98,7 @@ class CmsRemoteManager:
         self.node_id = node_id
         self.frigate_version = frigate_version
         self.transport = transport
+        self.on_runtime_patch_applied = on_runtime_patch_applied
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="cms_remote_sync", daemon=True)
@@ -469,11 +472,16 @@ class CmsRemoteManager:
                 ),
             )
             latest_stats = self.stats_provider()
-            self.runtime_store.start_canary(runtime_patch, policy, latest_stats, time.time())
+            candidate_config, applied_patch, _ = self.runtime_store.start_canary(
+                runtime_patch, policy, latest_stats, time.time()
+            )
         else:
-            self.runtime_store.apply_runtime_patch(runtime_patch)
+            candidate_config = self.runtime_store.apply_runtime_patch(runtime_patch)
+            applied_patch = runtime_patch
 
         self.state_store.put_runtime_overlay(self.runtime_tenant, self.runtime_store.runtime_overlay)
+        if self.on_runtime_patch_applied is not None:
+            self.on_runtime_patch_applied(applied_patch, candidate_config)
         with self._lock:
             self._runtime["last_known_good"] = {
                 "runtime_patch": runtime_patch,

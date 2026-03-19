@@ -192,6 +192,9 @@ def create_fastapi_app(
         runtime_tenant=selected_tenant,
         node_id=os.getenv("FRIGATE_NODE_ID", "node-1"),
         frigate_version=str(getattr(frigate_config, "version", "unknown")),
+        on_runtime_patch_applied=lambda patch, candidate_config: headless.apply_runtime_hot_reload(
+            app, patch, candidate_config
+        ),
     )
     app.state.headless_started_at = time.time()
     app.state.sse_client = sse_client

@@ -6,7 +6,9 @@ from frigate.headless.runtime_config import (
     CanaryPolicy,
     RuntimeConfigStore,
     assess_canary_health,
+    camera_patch_update_types,
     load_env_overlay,
+    patch_requires_restart,
     requires_restart,
     snapshot_camera_metrics,
 )
@@ -36,6 +38,43 @@ class TestHeadlessRuntimeConfig(unittest.TestCase):
     def test_requires_restart(self):
         self.assertTrue(requires_restart(["cameras"]))
         self.assertFalse(requires_restart(["camera_groups"]))
+
+    def test_camera_patch_update_types_includes_nested_topics(self):
+        update_types = camera_patch_update_types(
+            {
+                "objects": {"track": ["person"], "genai": {"enabled": True}},
+                "review": {"genai": {"enabled": True}},
+                "zones": {"front": {}},
+            }
+        )
+        self.assertEqual(
+            update_types,
+            {"objects", "object_genai", "review", "review_genai", "zones"},
+        )
+
+    def test_patch_requires_restart_false_for_supported_camera_hot_reload(self):
+        self.assertFalse(
+            patch_requires_restart(
+                {
+                    "cameras": {
+                        "front": {
+                            "enabled": False,
+                            "motion": {"threshold": 25},
+                            "objects": {"genai": {"enabled": True}},
+                        }
+                    }
+                },
+                ["cameras"],
+            )
+        )
+
+    def test_patch_requires_restart_true_for_unsupported_camera_field(self):
+        self.assertTrue(
+            patch_requires_restart(
+                {"cameras": {"front": {"ffmpeg": {"inputs": []}}}},
+                ["cameras"],
+            )
+        )
 
     def test_snapshot_camera_metrics(self):
         stats = {

@@ -18,8 +18,9 @@ from frigate.config.camera.updater import (
 )
 from frigate.headless.runtime_config import (
     CanaryPolicy,
+    camera_patch_update_types,
     diff_top_level_keys,
-    requires_restart,
+    patch_requires_restart,
 )
 from frigate.headless.noise_intelligence import generate_noise_suggestions
 from frigate.headless.observability import (
@@ -48,6 +49,111 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["headless"])
 ops_router = APIRouter(tags=["headless-ops"])
+
+
+def _candidate_camera_payload(candidate_camera: Any, update_type: str) -> Any:
+    if update_type == "audio":
+        return candidate_camera.audio
+    if update_type == "audio_transcription":
+        return candidate_camera.audio_transcription
+    if update_type == "birdseye":
+        return candidate_camera.birdseye
+    if update_type == "detect":
+        return candidate_camera.detect
+    if update_type == "enabled":
+        return candidate_camera.enabled
+    if update_type == "motion":
+        return candidate_camera.motion
+    if update_type == "notifications":
+        return candidate_camera.notifications
+    if update_type == "objects":
+        return candidate_camera.objects
+    if update_type == "object_genai":
+        return candidate_camera.objects.genai
+    if update_type == "record":
+        return candidate_camera.record
+    if update_type == "review":
+        return candidate_camera.review
+    if update_type == "review_genai":
+        return candidate_camera.review.genai
+    if update_type == "semantic_search":
+        return candidate_camera.semantic_search
+    if update_type == "snapshots":
+        return candidate_camera.snapshots
+    if update_type == "zones":
+        return candidate_camera.zones
+    raise ValueError(f"Unsupported camera hot reload topic: {update_type}")
+
+
+def _apply_camera_payload(current_camera: Any, candidate_camera: Any, update_type: str) -> None:
+    if update_type == "audio":
+        current_camera.audio = candidate_camera.audio
+    elif update_type == "audio_transcription":
+        current_camera.audio_transcription = candidate_camera.audio_transcription
+    elif update_type == "birdseye":
+        current_camera.birdseye = candidate_camera.birdseye
+    elif update_type == "detect":
+        current_camera.detect = candidate_camera.detect
+    elif update_type == "enabled":
+        current_camera.enabled = candidate_camera.enabled
+    elif update_type == "motion":
+        current_camera.motion = candidate_camera.motion
+    elif update_type == "notifications":
+        current_camera.notifications = candidate_camera.notifications
+    elif update_type == "objects":
+        current_camera.objects = candidate_camera.objects
+    elif update_type == "object_genai":
+        current_camera.objects.genai = candidate_camera.objects.genai
+    elif update_type == "record":
+        current_camera.record = candidate_camera.record
+    elif update_type == "review":
+        current_camera.review = candidate_camera.review
+    elif update_type == "review_genai":
+        current_camera.review.genai = candidate_camera.review.genai
+    elif update_type == "semantic_search":
+        current_camera.semantic_search = candidate_camera.semantic_search
+    elif update_type == "snapshots":
+        current_camera.snapshots = candidate_camera.snapshots
+    elif update_type == "zones":
+        current_camera.zones = candidate_camera.zones
+    else:
+        raise ValueError(f"Unsupported camera hot reload topic: {update_type}")
+
+
+def apply_runtime_hot_reload(app: Any, patch: dict[str, Any], candidate_config: Any) -> list[str]:
+    if not isinstance(patch, dict) or candidate_config is None:
+        return []
+
+    cameras_patch = patch.get("cameras", {})
+    if not isinstance(cameras_patch, dict):
+        return []
+
+    applied: list[str] = []
+
+    for camera_name, camera_patch in cameras_patch.items():
+        if not isinstance(camera_patch, dict):
+            continue
+
+        if camera_name not in app.frigate_config.cameras:
+            continue
+
+        candidate_camera = candidate_config.cameras.get(camera_name)
+        if candidate_camera is None:
+            continue
+
+        current_camera = app.frigate_config.cameras[camera_name]
+        for update_type in sorted(camera_patch_update_types(camera_patch)):
+            _apply_camera_payload(current_camera, candidate_camera, update_type)
+            app.config_publisher.publish_update(
+                CameraConfigUpdateTopic(
+                    CameraConfigUpdateEnum[update_type],
+                    camera_name,
+                ),
+                _candidate_camera_payload(candidate_camera, update_type),
+            )
+            applied.append(f"{camera_name}:{update_type}")
+
+    return applied
 
 
 class ConfigApplyRequest(BaseModel):
@@ -302,21 +408,6 @@ class AdaptiveRuleEvaluateRequest(BaseModel):
 
 class CmsSyncRequest(BaseModel):
     force: bool = True
-
-
-def _apply_zones_hot_reload(request: Request, patch: dict[str, Any]) -> None:
-    cameras_patch = patch.get("cameras", {}) if isinstance(patch, dict) else {}
-    for camera_name, camera_patch in cameras_patch.items():
-        zones = camera_patch.get("zones") if isinstance(camera_patch, dict) else None
-        if zones is None:
-            continue
-        if camera_name not in request.app.frigate_config.cameras:
-            continue
-        request.app.frigate_config.cameras[camera_name].zones = zones
-        request.app.config_publisher.publish_update(
-            CameraConfigUpdateTopic(CameraConfigUpdateEnum.zones, camera_name),
-            zones,
-        )
 
 
 def _runtime_tenant(request: Request, tenant_id: str | None = None) -> str:
@@ -585,14 +676,14 @@ def config_apply(request: Request, body: ConfigApplyRequest):
                 max_inference_latency_increase_pct=body.canary_max_inference_latency_increase_pct,
             )
             latest_stats = request.app.stats_emitter.get_latest_stats()
-            _, applied_patch, canary_status = store.start_canary(
+            candidate_config, applied_patch, canary_status = store.start_canary(
                 body.config, policy, latest_stats, time.time()
             )
-            _apply_zones_hot_reload(request, applied_patch)
+            apply_runtime_hot_reload(request.app, applied_patch, candidate_config)
             _persist_runtime_overlay(request, active_tenant)
             after = store.effective_dict()
             changed = diff_top_level_keys(before, after)
-            restart_needed = requires_restart(changed)
+            restart_needed = patch_requires_restart(applied_patch, changed)
             return JSONResponse(
                 content={
                     "requires_restart": restart_needed,
@@ -601,17 +692,15 @@ def config_apply(request: Request, body: ConfigApplyRequest):
                     "canary": canary_status,
                 }
             )
-        store.apply_runtime_patch(body.config)
+        candidate_config = store.apply_runtime_patch(body.config)
         _persist_runtime_overlay(request, active_tenant)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     after = store.effective_dict()
     changed = diff_top_level_keys(before, after)
-    restart_needed = requires_restart(changed)
-
-    # Apply hot reload for zones only.
-    _apply_zones_hot_reload(request, body.config)
+    restart_needed = patch_requires_restart(body.config, changed)
+    apply_runtime_hot_reload(request.app, body.config, candidate_config)
     append_audit_entry(
         request.app.state.headless_governance,
         {
@@ -872,15 +961,15 @@ def noise_suggestion_approve(
     before = runtime_store.effective_dict()
 
     try:
-        runtime_store.apply_runtime_patch(patch)
+        candidate_config = runtime_store.apply_runtime_patch(patch)
         _persist_runtime_overlay(request, tenant_id)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     after = runtime_store.effective_dict()
     changed = diff_top_level_keys(before, after)
-    restart_needed = requires_restart(changed)
-    _apply_zones_hot_reload(request, patch)
+    restart_needed = patch_requires_restart(patch, changed)
+    apply_runtime_hot_reload(request.app, patch, candidate_config)
 
     audit_entry = {
         "suggestion_id": suggestion_id,

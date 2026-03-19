@@ -57,6 +57,7 @@ class TestCmsRemoteManager(unittest.TestCase):
         )
         state_store = FakeStateStore()
         runtime_store = FakeRuntimeStore()
+        applied = []
 
         def transport(method, url, headers, payload, timeout):
             del headers, timeout
@@ -86,6 +87,9 @@ class TestCmsRemoteManager(unittest.TestCase):
             node_id="node-1",
             frigate_version="1.0",
             transport=transport,
+            on_runtime_patch_applied=lambda patch, candidate: applied.append(
+                (copy.deepcopy(patch), copy.deepcopy(candidate))
+            ),
         )
 
         snapshot = manager.sync_once(force=True)
@@ -94,6 +98,7 @@ class TestCmsRemoteManager(unittest.TestCase):
         self.assertEqual(snapshot["edge_id"], "edge-1")
         self.assertEqual(snapshot["config_version"], 3)
         self.assertEqual(runtime_store.runtime_overlay["mqtt"]["enabled"], False)
+        self.assertEqual(applied[0][0], {"mqtt": {"enabled": False}})
 
     def test_password_auth_flow(self):
         settings = SimpleNamespace(

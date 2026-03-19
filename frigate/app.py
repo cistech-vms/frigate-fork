@@ -625,8 +625,10 @@ class FrigateApp:
         empty_and_close_queue(self.timeline_queue)
         logger.info("Timeline queue closed")
 
-        self.output_processor.terminate()
-        self.output_processor.join()
+        output_processor = getattr(self, "output_processor", None)
+        if output_processor is not None:
+            output_processor.terminate()
+            output_processor.join()
 
         self.recording_process.terminate()
         self.recording_process.join()
@@ -635,6 +637,7 @@ class FrigateApp:
         self.review_segment_process.join()
 
         self.dispatcher.stop()
+        self.camera_maintainer.join()
         self.ptz_autotracker_thread.join()
 
         self.event_cleanup.join()

@@ -22,6 +22,24 @@ def deep_merge(dct1: dict, dct2: dict) -> dict:
 
 CFG_PREFIX = "FRIGATE_CFG__"
 
+CAMERA_HOT_RELOAD_FIELDS = frozenset(
+    {
+        "audio",
+        "audio_transcription",
+        "birdseye",
+        "detect",
+        "enabled",
+        "motion",
+        "notifications",
+        "objects",
+        "record",
+        "review",
+        "semantic_search",
+        "snapshots",
+        "zones",
+    }
+)
+
 
 @dataclass
 class CanaryPolicy:
@@ -332,3 +350,53 @@ def diff_top_level_keys(before: dict[str, Any], after: dict[str, Any]) -> list[s
 def requires_restart(changed_keys: list[str]) -> bool:
     hot_reload_allowed = {"camera_groups"}
     return any(key not in hot_reload_allowed for key in changed_keys)
+
+
+def camera_patch_update_types(camera_patch: dict[str, Any]) -> set[str]:
+    if not isinstance(camera_patch, dict):
+        return set()
+
+    update_types: set[str] = set()
+
+    for key, value in camera_patch.items():
+        if key not in CAMERA_HOT_RELOAD_FIELDS:
+            continue
+
+        update_types.add(key)
+
+        if key == "objects" and isinstance(value, dict) and "genai" in value:
+            update_types.add("object_genai")
+        elif key == "review" and isinstance(value, dict) and "genai" in value:
+            update_types.add("review_genai")
+
+    return update_types
+
+
+def patch_requires_restart(
+    runtime_patch: dict[str, Any], changed_keys: list[str] | None = None
+) -> bool:
+    if not isinstance(runtime_patch, dict) or not runtime_patch:
+        return requires_restart(changed_keys or [])
+
+    effective_changed = changed_keys or list(runtime_patch.keys())
+
+    for key in effective_changed:
+        if key == "camera_groups":
+            continue
+
+        if key != "cameras":
+            return True
+
+    cameras_patch = runtime_patch.get("cameras")
+    if not isinstance(cameras_patch, dict):
+        return "cameras" in effective_changed
+
+    for camera_patch in cameras_patch.values():
+        if not isinstance(camera_patch, dict):
+            return True
+
+        unsupported = set(camera_patch.keys()) - CAMERA_HOT_RELOAD_FIELDS
+        if unsupported:
+            return True
+
+    return False
