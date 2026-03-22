@@ -1,11 +1,13 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from frigate.headless.db_adapter import SqliteAdapter
 from frigate.headless.object_storage import LocalObjectStorageAdapter
 from frigate.headless.observability import (
     build_observability_snapshot,
+    build_performance_diagnostics,
     evaluate_release_gate,
 )
 from frigate.headless.self_healing import (
@@ -54,6 +56,82 @@ class TestResilienceAdvancedPipeline(unittest.TestCase):
         )
         gate = evaluate_release_gate(snapshot)
         self.assertTrue(gate["passed"])
+
+    def test_performance_diagnostics_identifies_camera_and_host_pressure(self):
+        frigate_config = SimpleNamespace(
+            cameras={
+                "front": SimpleNamespace(
+                    detect=SimpleNamespace(width=1920, height=1080, fps=10),
+                    audio=SimpleNamespace(enabled=True),
+                    record=SimpleNamespace(enabled=True),
+                    review=SimpleNamespace(enabled=True),
+                    snapshots=SimpleNamespace(enabled=True),
+                    semantic_search=SimpleNamespace(enabled=False),
+                    face_recognition=SimpleNamespace(enabled=False),
+                    lpr=SimpleNamespace(enabled=False),
+                    ffmpeg=SimpleNamespace(
+                        inputs=[SimpleNamespace(roles=["detect", "record"])]
+                    ),
+                )
+            }
+        )
+        stats = {
+            "camera_fps": 12.0,
+            "process_fps": 4.0,
+            "skipped_fps": 3.0,
+            "detection_fps": 4.0,
+            "cameras": {
+                "front": {
+                    "camera_fps": 12.0,
+                    "process_fps": 4.0,
+                    "skipped_fps": 3.0,
+                    "detection_fps": 4.0,
+                    "adaptive_inference_latency_ms": 180.0,
+                    "pid": 200,
+                    "ffmpeg_pid": 100,
+                }
+            },
+            "cpu_usages": {
+                "100": {"cpu": 92.0, "mem": 12.0, "cmdline": "ffmpeg front"},
+                "200": {"cpu": 88.0, "mem": 10.0, "cmdline": "detect front"},
+            },
+            "detectors": {"cpu": {"inference_speed": 185.0, "pid": 200}},
+            "service": {
+                "storage": {
+                    "/media/frigate/recordings": {"total": 100.0, "free": 8.0},
+                    "/tmp/cache": {"total": 10.0, "free": 0.8},
+                }
+            },
+        }
+        stats_history = [stats]
+        hardware_profile = {
+            "decode_acceleration": "software",
+            "recommendation": {
+                "tier": "edge_basic",
+                "profiles": {"720p_5fps": 1, "1080p_5fps": 1, "1080p_10fps": 1},
+                "notes": [],
+            },
+        }
+
+        report = build_performance_diagnostics(
+            stats=stats,
+            stats_history=stats_history,
+            hardware_profile=hardware_profile,
+            frigate_config=frigate_config,
+        )
+
+        bottlenecks = {item["kind"] for item in report["cameras"]["front"]["bottlenecks"]}
+        host_issues = {item["kind"] for item in report["issues"]}
+
+        self.assertIn("decode_pressure", bottlenecks)
+        self.assertIn("inference_pressure", bottlenecks)
+        self.assertIn("stream_configuration", bottlenecks)
+        self.assertIn("feature_pressure", bottlenecks)
+        self.assertIn("camera_capacity_exceeded", host_issues)
+        self.assertIn("storage_pressure", host_issues)
+        self.assertIn("decode_without_hwaccel", host_issues)
+        self.assertGreater(report["host"]["capacity_utilization"], 1.0)
+        self.assertTrue(report["recommendations"])
 
 
 if __name__ == "__main__":

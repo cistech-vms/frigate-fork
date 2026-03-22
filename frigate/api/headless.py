@@ -31,6 +31,7 @@ from frigate.headless.installer import (
 from frigate.headless.noise_intelligence import generate_noise_suggestions
 from frigate.headless.observability import (
     build_observability_snapshot,
+    build_performance_diagnostics,
     evaluate_release_gate,
 )
 from frigate.headless.production_readiness import build_production_readiness_report
@@ -1216,6 +1217,26 @@ def resilience_release_gate(request: Request):
         storage_sync=request.app.state.storage_sync.status(),
     )
     return JSONResponse(content=evaluate_release_gate(snapshot))
+
+
+@router.get("/resilience/observability/performance", dependencies=[Depends(require_role("reader"))])
+def resilience_observability_performance(request: Request):
+    stats = request.app.stats_emitter.get_latest_stats()
+    history = request.app.stats_emitter.get_stats_history()
+    installer_state = getattr(request.app.state, "headless_installer", {})
+    hardware_profile = {}
+    if isinstance(installer_state, dict):
+        hardware_profile = installer_state.get("hardware_profile") or {}
+    if not hardware_profile:
+        hardware_profile = build_hardware_profile()
+
+    report = build_performance_diagnostics(
+        stats=stats,
+        stats_history=history,
+        hardware_profile=hardware_profile,
+        frigate_config=request.app.frigate_config,
+    )
+    return JSONResponse(content=report)
 
 
 @router.get("/production/readiness", dependencies=[Depends(require_role("reader"))])
