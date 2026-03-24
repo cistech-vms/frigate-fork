@@ -595,7 +595,15 @@ class RegionModel(BaseModel):
     id: str
     tenant_id: str
     camera_id: str
+    friendly_name: str | None = None
     shape: RegionShape
+    objects: list[str] = Field(default_factory=list)
+    filters: dict[str, Any] = Field(default_factory=dict)
+    inertia: int = 3
+    loitering_time: int = 0
+    speed_threshold: float | None = None
+    distances: list[float] = Field(default_factory=list)
+    mode: Literal["inside", "crossing", "enter_exit"] = "inside"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -876,13 +884,22 @@ def upsert_region(request: Request, camera_id: str, body: RegionModel):
 
     # Optional hot reload: if polygon, map region to zone coordinates.
     if camera_id in request.app.frigate_config.cameras and body.shape.type == "polygon" and body.shape.points:
-        zone_name = body.metadata.get("name", body.id)
+        zone_name = body.id
         zone_config = {
             "coordinates": ",".join([f"{p[0]},{p[1]}" for p in body.shape.points]),
-            "objects": body.metadata.get("labels", []),
-            "inertia": body.metadata.get("inertia", 3),
-            "loitering_time": body.metadata.get("loitering_time", 0),
+            "objects": body.objects or body.metadata.get("labels", []),
+            "filters": body.filters,
+            "inertia": body.inertia,
+            "loitering_time": body.loitering_time,
+            "mode": body.mode,
         }
+        if body.friendly_name:
+            zone_config["friendly_name"] = body.friendly_name
+        if body.speed_threshold is not None:
+            zone_config["speed_threshold"] = body.speed_threshold
+        if body.distances:
+            zone_config["distances"] = [str(float(value)) for value in body.distances]
+
         zones = request.app.frigate_config.cameras[camera_id].zones
         zones[zone_name] = zone_config
         request.app.config_publisher.publish_update(
@@ -917,6 +934,16 @@ def delete_region(request: Request, camera_id: str, region_id: str):
 
     removed = region_store.pop(key)
     _persist_regions(request)
+
+    if camera_id in request.app.frigate_config.cameras:
+        zones = request.app.frigate_config.cameras[camera_id].zones
+        if region_id in zones:
+            zones.pop(region_id, None)
+            request.app.config_publisher.publish_update(
+                CameraConfigUpdateTopic(CameraConfigUpdateEnum.zones, camera_id),
+                zones,
+            )
+
     event_id = request.app.state.reliable_delivery.emit("regions/delete", removed)
     return JSONResponse(content={"success": True, "event_id": event_id})
 
