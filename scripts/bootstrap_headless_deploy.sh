@@ -132,6 +132,15 @@ upsert_env() {
   mv "$tmp" "$ENV_FILE"
 }
 
+remove_env() {
+  local key="$1"
+  local tmp
+  tmp="$(mktemp)"
+
+  awk -v key="$key" 'index($0, key "=") != 1 { print }' "$ENV_FILE" > "$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
 needs_secret_refresh() {
   local value="$1"
   [[ -z "$value" || "$value" == "__GENERATE__" || "$value" == *"change-me"* ]]
@@ -151,8 +160,8 @@ upsert_env "FRIGATE_API_AUTH_MODE" "hmac"
 upsert_env "FRIGATE_TENANT_ID" "$TENANT_ID"
 upsert_env "FRIGATE_METRICS_ENABLED" "true"
 upsert_env "FRIGATE_LOG_FORMAT" "json"
-upsert_env "FRIGATE_CFG__mqtt__enabled" "true"
-upsert_env "FRIGATE_CFG__record__enabled" "true"
+remove_env "FRIGATE_CFG__mqtt__enabled"
+remove_env "FRIGATE_CFG__record__enabled"
 
 current_hmac="$(current_env_value "FRIGATE_API_HMAC_KEYS_JSON")"
 current_jwt="$(current_env_value "FRIGATE_API_JWT_SECRET")"
