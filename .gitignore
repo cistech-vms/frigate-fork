@@ -1,4 +1,6 @@
 .DS_Store
+.env
+storage/
 __pycache__
 .mypy_cache
 *.swp
@@ -7,6 +9,7 @@ debug
 !.vscode/launch.json
 config/*
 !config/*.example
+!config/*.example.yml
 models
 *.mp4
 *.db

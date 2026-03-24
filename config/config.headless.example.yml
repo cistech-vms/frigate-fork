@@ -1,0 +1,9 @@
+# Minimal production bootstrap config for headless deployments.
+# Cameras can be staged later with: python3 -m frigate install
+mqtt:
+  host: mqtt
+
+go2rtc:
+  streams: {}
+
+cameras: {}

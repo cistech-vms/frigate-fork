@@ -1,0 +1,40 @@
+services:
+  frigate:
+    container_name: frigate-headless
+    build:
+      context: .
+      dockerfile: docker/main/Dockerfile
+      target: frigate
+    restart: unless-stopped
+    shm_size: "1gb"
+    ports:
+      - "5000:5000"
+      - "8554:8554"
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    env_file:
+      - .env
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./config:/config
+      - ./storage:/media/frigate
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt
+
+  mqtt:
+    container_name: frigate-mqtt
+    image: eclipse-mosquitto:2.0
+    command: mosquitto -c /mosquitto-no-auth.conf
+    restart: unless-stopped
+    ports:
+      - "1883:1883"

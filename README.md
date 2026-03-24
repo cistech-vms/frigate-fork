@@ -111,3 +111,9 @@ O Frigate agora atua como **data-plane de borda** para ser controlado por um **c
 - `python3 -m unittest frigate.test.test_headless_runtime`
 
 Resultado: compilação e testes mínimos da camada headless OK.
+
+## Deploy Ubuntu + NVIDIA
+- Compose de producao: `docker-compose.prod.yml`
+- Bootstrap de `.env` e config minima: `scripts/bootstrap_headless_deploy.sh`
+- Helper para assinar requests HMAC: `scripts/render_hmac_headers.py`
+- Guia operacional: `docs/deploy-ubuntu-nvidia.md`
