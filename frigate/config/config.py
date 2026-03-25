@@ -158,6 +158,10 @@ class RuntimeFilterConfig(FilterConfig):
             ret.pop("raw_mask")
         return ret
 
+    @field_serializer("raw_mask", when_used="json")
+    def serialize_raw_mask(self, value: Any, info):
+        return self.raw_mask
+
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="ignore")
 
 
