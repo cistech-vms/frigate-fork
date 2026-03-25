@@ -1,5 +1,6 @@
 # NVIDIA GPU profile for x86 hosts with Frigate headless.
-# Copy this file to config/config.yml and adjust camera/model paths before first boot.
+# Safe production bootstrap: no fake cameras, no placeholder IPs.
+# Real cameras can be added later via config API or installer.
 
 mqtt:
   host: mqtt
@@ -9,7 +10,7 @@ detectors:
     type: onnx
 
 model:
-  path: /config/model_cache/yolov9-t-320.onnx
+  path: /config/model_cache/yolo.onnx
   model_type: yolo-generic
   width: 320
   height: 320
@@ -21,37 +22,8 @@ ffmpeg:
   hwaccel_args: preset-nvidia
 
 go2rtc:
-  streams:
-    camera_main:
-      - rtsp://usuario:senha@192.168.1.50:554/cam/realmonitor?channel=1&subtype=0
-    camera_sub:
-      - rtsp://usuario:senha@192.168.1.50:554/cam/realmonitor?channel=1&subtype=1
+  streams: {}
 
-cameras:
-  camera_exemplo:
-    enabled: true
-    audio:
-      enabled: false
-    ffmpeg:
-      inputs:
-        - path: rtsp://127.0.0.1:8554/camera_main
-          input_args: preset-rtsp-restream
-          roles:
-            - record
-        - path: rtsp://127.0.0.1:8554/camera_sub
-          input_args: preset-rtsp-restream
-          roles:
-            - detect
-    detect:
-      enabled: true
-      width: 1280
-      height: 720
-      fps: 5
-    record:
-      enabled: true
-    snapshots:
-      enabled: true
-    objects:
-      track:
-        - person
-        - car
+cameras: {}
+
+version: 0.17-0

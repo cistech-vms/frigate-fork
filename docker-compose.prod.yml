@@ -1,12 +1,10 @@
 services:
   frigate:
     container_name: frigate-headless
-    build:
-      context: .
-      dockerfile: docker/main/Dockerfile
-      target: frigate
+    image: ${FRIGATE_IMAGE:-frigate:local-tensorrt}
     restart: unless-stopped
     runtime: nvidia
+    gpus: all
     shm_size: "1gb"
     ports:
       - "5000:5000"
@@ -16,15 +14,8 @@ services:
     env_file:
       - .env
     environment:
-      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "${FRIGATE_GPU_DEVICE:-0}"
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
     volumes:
       - ./config:/config
       - ./storage:/media/frigate
