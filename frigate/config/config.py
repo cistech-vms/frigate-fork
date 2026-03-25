@@ -100,7 +100,7 @@ class RuntimeMotionConfig(MotionConfig):
         frame_shape = config.get("frame_shape", (1, 1))
 
         mask = get_relative_coordinates(config.get("mask", ""), frame_shape)
-        config["raw_mask"] = mask
+        config["raw_mask"] = mask or ""
 
         if mask:
             config["mask"] = create_mask(frame_shape, mask)
@@ -131,13 +131,13 @@ class RuntimeMotionConfig(MotionConfig):
 
 class RuntimeFilterConfig(FilterConfig):
     mask: Optional[np.ndarray] = None
-    raw_mask: Optional[Union[str, List[str]]] = None
+    raw_mask: Union[str, List[str]] = ""
 
     def __init__(self, **config):
         frame_shape = config.get("frame_shape", (1, 1))
         mask = get_relative_coordinates(config.get("mask"), frame_shape)
 
-        config["raw_mask"] = mask
+        config["raw_mask"] = mask or ""
 
         if mask is not None:
             config["mask"] = create_mask(frame_shape, mask)
