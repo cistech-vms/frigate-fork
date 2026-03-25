@@ -37,6 +37,7 @@ from frigate.headless.runbooks import default_runbooks
 from frigate.headless.secrets_rotation import SecretRotationManager
 from frigate.headless.self_healing import init_self_healing_state
 from frigate.headless.state_persistence import get_headless_state_store
+from frigate.headless.state_repository import HeadlessStateRepositoryAdapter
 from frigate.headless.storage_sync import StorageSyncManager
 from frigate.headless.supply_chain import SupplyChainHardening
 from frigate.headless.tenant_isolation import TenantQuotaManager
@@ -141,6 +142,7 @@ def create_fastapi_app(
     app.state.runtime_config_store = init_runtime_store(frigate_config)
     app.state.headless_settings = headless_settings
     app.state.headless_state_store = get_headless_state_store()
+    app.state.headless_state_repository = HeadlessStateRepositoryAdapter(app.state.headless_state_store)
     app.state.headless_db_adapter = build_database_adapter()
     app.state.headless_redis_adapter = build_redis_adapter()
     app.state.headless_object_storage = build_object_storage_adapter()

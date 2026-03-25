@@ -23,6 +23,7 @@ from frigate.headless.runtime_config import (
     diff_top_level_keys,
     patch_requires_restart,
 )
+from frigate.headless.control_plane_state import apply_runtime_patch_to_desired_state
 from frigate.headless.installer import (
     build_camera_connection_patch,
     build_hardware_profile,
@@ -474,6 +475,21 @@ def _persist_regions(request: Request) -> None:
     request.app.state.headless_state_store.put_regions(request.app.state.headless_regions)
 
 
+def _persist_desired_state_patch(
+    request: Request, tenant_id: str, patch: dict[str, Any], *, origin: str
+) -> None:
+    if not isinstance(patch, dict) or not patch:
+        return
+
+    repository = getattr(request.app.state, "headless_state_repository", None)
+    if repository is None:
+        return
+
+    current = repository.load_desired_state(tenant_id)
+    desired = apply_runtime_patch_to_desired_state(current, patch, origin=origin)
+    repository.save_desired_state(desired)
+
+
 def _compute_readiness(request: Request) -> dict[str, Any]:
     settings = request.app.state.headless_settings
     stats = request.app.stats_emitter.get_latest_stats()
@@ -731,6 +747,9 @@ def config_apply(request: Request, body: ConfigApplyRequest):
             )
             apply_runtime_hot_reload(request.app, applied_patch, candidate_config)
             _persist_runtime_overlay(request, active_tenant)
+            _persist_desired_state_patch(
+                request, active_tenant, applied_patch, origin="config_apply_canary"
+            )
             after = store.effective_dict()
             changed = diff_top_level_keys(before, after)
             restart_needed = patch_requires_restart(applied_patch, changed)
@@ -744,6 +763,7 @@ def config_apply(request: Request, body: ConfigApplyRequest):
             )
         candidate_config = store.apply_runtime_patch(body.config)
         _persist_runtime_overlay(request, active_tenant)
+        _persist_desired_state_patch(request, active_tenant, body.config, origin="config_apply")
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1991,6 +2011,7 @@ def install_discovery_connect(request: Request, body: InstallDiscoveryConnectReq
 
     tenant = _runtime_tenant(request, body.tenant_id)
     request.app.state.headless_state_store.put_runtime_overlay(tenant, merged_overlay)
+    _persist_desired_state_patch(request, tenant, patch, origin="installer_connect")
     request.app.state.headless_installer["pending_patch"] = patch
 
     return JSONResponse(

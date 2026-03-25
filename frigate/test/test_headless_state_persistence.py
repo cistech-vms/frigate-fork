@@ -12,6 +12,8 @@ class TestHeadlessStatePersistence(unittest.TestCase):
             store = HeadlessStateStore(path=path)
             state = store.load()
             self.assertEqual(state["runtime_overlays"], {})
+            self.assertEqual(state["desired_state"], {"tenants": {}})
+            self.assertEqual(state["operational_state"], {"tenants": {}})
             self.assertEqual(state["triggers"], {})
             self.assertEqual(state["regions"], {})
 
@@ -44,6 +46,20 @@ class TestHeadlessStatePersistence(unittest.TestCase):
             self.assertEqual(state["triggers"], triggers)
             self.assertEqual(state["regions"], regions)
 
+    def test_put_desired_and_operational_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "state.json")
+            store = HeadlessStateStore(path=path)
+
+            desired = {"tenants": {"tenant-a": {"cameras": {"front": {"stream_url": "rtsp://front"}}}}}
+            operational = {"tenants": {"tenant-a": {"cameras": {"front": {"status": "healthy"}}}}}
+            store.put_desired_state(desired)
+            store.put_operational_state(operational)
+
+            state = store.load()
+            self.assertEqual(state["desired_state"], desired)
+            self.assertEqual(state["operational_state"], operational)
+
     def test_load_invalid_json_returns_default_state(self):
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "state.json")
@@ -52,6 +68,8 @@ class TestHeadlessStatePersistence(unittest.TestCase):
             store = HeadlessStateStore(path=path)
             state = store.load()
             self.assertEqual(state["runtime_overlays"], {})
+            self.assertEqual(state["desired_state"], {"tenants": {}})
+            self.assertEqual(state["operational_state"], {"tenants": {}})
             self.assertEqual(state["triggers"], {})
             self.assertEqual(state["regions"], {})
 

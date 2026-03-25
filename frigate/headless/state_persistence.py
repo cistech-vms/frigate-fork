@@ -17,6 +17,8 @@ def _default_state() -> dict[str, Any]:
         "version": STATE_VERSION,
         "updated_at": int(time.time()),
         "runtime_overlays": {},
+        "desired_state": {"tenants": {}},
+        "operational_state": {"tenants": {}},
         "triggers": {},
         "regions": {},
         "event_delivery_status": {
@@ -76,6 +78,10 @@ class HeadlessStateStore:
         state = _default_state()
         if isinstance(payload.get("runtime_overlays"), dict):
             state["runtime_overlays"] = payload["runtime_overlays"]
+        if isinstance(payload.get("desired_state"), dict):
+            state["desired_state"] = payload["desired_state"]
+        if isinstance(payload.get("operational_state"), dict):
+            state["operational_state"] = payload["operational_state"]
         if isinstance(payload.get("triggers"), dict):
             state["triggers"] = payload["triggers"]
         if isinstance(payload.get("regions"), dict):
@@ -146,6 +152,30 @@ class HeadlessStateStore:
             overlays = {}
             state["runtime_overlays"] = overlays
         overlays[tenant_id] = runtime_overlay
+        return self.save(state)
+
+    def desired_state(self) -> dict[str, Any]:
+        state = self.load()
+        desired = state.get("desired_state", {})
+        if isinstance(desired, dict):
+            return desired
+        return _default_state()["desired_state"]
+
+    def put_desired_state(self, desired_state: dict[str, Any]) -> dict[str, Any]:
+        state = self.load()
+        state["desired_state"] = desired_state
+        return self.save(state)
+
+    def operational_state(self) -> dict[str, Any]:
+        state = self.load()
+        operational = state.get("operational_state", {})
+        if isinstance(operational, dict):
+            return operational
+        return _default_state()["operational_state"]
+
+    def put_operational_state(self, operational_state: dict[str, Any]) -> dict[str, Any]:
+        state = self.load()
+        state["operational_state"] = operational_state
         return self.save(state)
 
     def put_triggers(self, triggers: dict[str, dict[str, Any]]) -> dict[str, Any]:
