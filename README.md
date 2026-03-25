@@ -113,7 +113,8 @@ O Frigate agora atua como **data-plane de borda** para ser controlado por um **c
 Resultado: compilação e testes mínimos da camada headless OK.
 
 ## Deploy Ubuntu + NVIDIA
-- Compose de producao: `docker-compose.prod.yml`
+- Compose de producao com runtime NVIDIA: `docker-compose.prod.yml`
 - Bootstrap de `.env` e config minima: `scripts/bootstrap_headless_deploy.sh`
+- Exemplo de config GPU/ONNX: `config/config.nvidia.onnx.example.yml`
 - Helper para assinar requests HMAC: `scripts/render_hmac_headers.py`
 - Guia operacional: `docs/deploy-ubuntu-nvidia.md`

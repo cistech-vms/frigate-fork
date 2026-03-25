@@ -6,6 +6,7 @@ services:
       dockerfile: docker/main/Dockerfile
       target: frigate
     restart: unless-stopped
+    runtime: nvidia
     shm_size: "1gb"
     ports:
       - "5000:5000"
@@ -15,14 +16,14 @@ services:
     env_file:
       - .env
     environment:
-      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_VISIBLE_DEVICES: "0"
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ["0"]
               capabilities: [gpu]
     volumes:
       - ./config:/config
