@@ -658,7 +658,6 @@ class FrigateConfig(FrigateBaseModel):
             else:
                 camera_config.motion = RuntimeMotionConfig(
                     frame_shape=camera_config.frame_shape,
-                    raw_mask=camera_config.motion.mask,
                     **camera_config.motion.model_dump(exclude_unset=True),
                 )
             camera_config.motion.enabled_in_config = camera_config.motion.enabled

@@ -555,6 +555,37 @@ class TestConfig(unittest.TestCase):
             frigate_config.cameras["relative"].motion.mask,
         )
 
+    def test_motion_raw_mask_survives_json_round_trip(self):
+        config = {
+            "mqtt": {"host": "mqtt"},
+            "cameras": {
+                "back": {
+                    "ffmpeg": {
+                        "inputs": [
+                            {"path": "rtsp://10.0.0.1:554/video", "roles": ["detect"]}
+                        ]
+                    },
+                    "detect": {
+                        "height": 400,
+                        "width": 800,
+                        "fps": 5,
+                    },
+                    "motion": {
+                        "mask": [
+                            "0.0,0.0,0.25,0.25,0.75,0.75,1.0,1.0",
+                        ]
+                    },
+                },
+            },
+        }
+
+        frigate_config = FrigateConfig(**config)
+        dumped = frigate_config.model_dump(mode="json")
+
+        assert dumped["cameras"]["back"]["motion"]["raw_mask"] == [
+            "0.0,0.0,0.25,0.25,0.75,0.75,1.0,1.0"
+        ]
+
     def test_default_input_args(self):
         config = {
             "mqtt": {"host": "mqtt"},
