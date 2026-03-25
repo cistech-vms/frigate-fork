@@ -185,7 +185,9 @@ class RuntimeConfigStore:
     lock: Lock = field(default_factory=Lock)
 
     def effective_dict(self) -> dict[str, Any]:
-        base = self.base_config.model_dump(mode="json", warnings="none", exclude_none=True)
+        base = self.base_config.model_dump(
+            mode="json", warnings="none", exclude_none=True, exclude_defaults=True
+        )
         merged = deep_merge(base, self.env_overlay)
         merged = deep_merge(merged, self.runtime_overlay)
         return merged
@@ -217,7 +219,7 @@ class RuntimeConfigStore:
             from frigate.config import FrigateConfig
 
             base = self.base_config.model_dump(
-                mode="json", warnings="none", exclude_none=True
+                mode="json", warnings="none", exclude_none=True, exclude_defaults=True
             )
             candidate_dict = deep_merge(deep_merge(base, self.env_overlay), runtime_overlay)
             candidate = FrigateConfig.model_validate(candidate_dict)

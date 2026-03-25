@@ -1,4 +1,6 @@
 import os
+import sys
+import types
 import unittest
 from types import SimpleNamespace
 
@@ -114,6 +116,38 @@ class TestHeadlessRuntimeConfig(unittest.TestCase):
         )
         reasons = assess_canary_health(baseline, current, policy)
         self.assertTrue(len(reasons) >= 2)
+
+    def test_runtime_store_uses_exclude_defaults_for_round_trip(self):
+        calls = []
+
+        def fake_model_dump(**kwargs):
+            calls.append(kwargs)
+            return {"mqtt": {"enabled": True}, "cameras": {}}
+
+        base_config = SimpleNamespace(model_dump=fake_model_dump)
+        store = RuntimeConfigStore(base_config=base_config, env_overlay={})
+
+        original_module = sys.modules.get("frigate.config")
+        fake_module = types.SimpleNamespace(
+            FrigateConfig=type(
+                "FakeFrigateConfig",
+                (),
+                {"model_validate": staticmethod(lambda candidate: candidate)},
+            )
+        )
+        sys.modules["frigate.config"] = fake_module
+        try:
+            store.effective_dict()
+            store.replace_runtime_overlay({})
+        finally:
+            if original_module is None:
+                sys.modules.pop("frigate.config", None)
+            else:
+                sys.modules["frigate.config"] = original_module
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0]["exclude_defaults"])
+        self.assertTrue(calls[1]["exclude_defaults"])
 
     def test_runtime_store_canary_rollback(self):
         base = {"mqtt": {"enabled": True}, "cameras": {"front": {"enabled": True}}}
