@@ -41,4 +41,4 @@ class MotionConfig(FrigateBaseModel):
 
     @field_serializer("raw_mask", when_used="json")
     def serialize_raw_mask(self, value: Any, info):
-        return self.raw_mask
+        return None
