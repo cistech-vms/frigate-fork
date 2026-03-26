@@ -1,6 +1,6 @@
 # Deploy Ubuntu + NVIDIA
 
-Este guia prepara a branch headless para um host Ubuntu com Docker e GPU NVIDIA usando TensorRT para inferencia via imagem local `frigate:local-tensorrt`.
+Este guia prepara a branch headless para um host Ubuntu com Docker e GPU NVIDIA usando TensorRT/CUDA via imagem local `frigate:local-tensorrt`.
 
 ## Artefatos adicionados para deploy
 
@@ -45,6 +45,14 @@ docker volume prune -f
 docker system df
 ```
 
+Se voce quer apenas um rebuild limpo da imagem TensorRT local sem limpar volumes e recursos alem do necessario:
+
+```bash
+docker compose -f docker-compose.prod.yml down --remove-orphans || true
+docker builder prune -af
+docker image rm frigate:local-tensorrt || true
+```
+
 ## Gerar o modelo ONNX
 
 ```bash
@@ -65,6 +73,50 @@ Se quiser limpar antes do build da imagem:
 bash scripts/build_local_tensorrt_image.sh --clean
 ```
 
+## Fluxo recomendado para rebuild com GPU/TensorRT
+
+Use este fluxo quando precisar rebuildar o Frigate local com suporte CUDA/TensorRT:
+
+```bash
+cd ~/projects/frigate
+
+docker compose -f docker-compose.prod.yml down --remove-orphans || true
+docker builder prune -af
+docker image rm frigate:local-tensorrt || true
+
+bash scripts/build_local_tensorrt_image.sh
+
+docker compose -f docker-compose.prod.yml up -d --force-recreate
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs --tail=200 frigate
+```
+
+Se quiser que o proprio script faca a limpeza antes do build:
+
+```bash
+cd ~/projects/frigate
+
+bash scripts/build_local_tensorrt_image.sh --clean
+docker compose -f docker-compose.prod.yml up -d --force-recreate
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs --tail=200 frigate
+```
+
+## Nao use este build para a tag local-tensorrt
+
+Nao gere `frigate:local-tensorrt` com a Dockerfile padrao abaixo:
+
+```bash
+docker buildx build \
+  --target=frigate \
+  --file docker/main/Dockerfile \
+  . \
+  --tag frigate:local-tensorrt \
+  --load
+```
+
+Esse comando sobrescreve a tag `frigate:local-tensorrt` com a imagem padrao do Frigate, sem a stack TensorRT esperada para este deploy. O resultado tipico e o container subir apenas com `CPUExecutionProvider`.
+
 ## Subir os containers
 
 ```bash
@@ -82,6 +134,37 @@ docker exec -it frigate-headless python3 -c "import onnxruntime as ort; print(or
 
 Para estar realmente em GPU, voce precisa ver `CUDAExecutionProvider` e/ou `TensorrtExecutionProvider`.
 Se aparecer apenas `CPUExecutionProvider`, a imagem de inferencia em GPU nao entrou.
+
+Exemplo esperado:
+
+```bash
+['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+```
+
+Exemplo incorreto:
+
+```bash
+['AzureExecutionProvider', 'CPUExecutionProvider']
+```
+
+Neste caso, a imagem `frigate:local-tensorrt` foi reconstruida de forma errada e precisa ser gerada novamente com `scripts/build_local_tensorrt_image.sh`.
+
+## Verificacoes operacionais apos a subida
+
+```bash
+eval "curl http://127.0.0.1:5000/v1/status $(python3 scripts/render_hmac_headers.py --env-file .env --key-id edge-reader --curl)"
+```
+
+```bash
+eval "curl http://127.0.0.1:5000/v1/config/effective $(python3 scripts/render_hmac_headers.py --env-file .env --key-id edge-reader --curl)"
+```
+
+Valide principalmente:
+
+- `ffmpeg.hwaccel_args: preset-nvidia`
+- `gpu_usages` presente no `/v1/status`
+- `camera_fps`, `process_fps` e `detection_fps` acima de zero quando houver camera valida
+- providers ONNX contendo `CUDAExecutionProvider` e/ou `TensorrtExecutionProvider`
 
 ## O que validar no config.yml
 
