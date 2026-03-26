@@ -11,6 +11,7 @@ from ruamel.yaml import YAML
 sys.path.insert(0, "/opt/frigate")
 from frigate.const import (
     BIRDSEYE_PIPE,
+    CONFIG_DIR,
     DEFAULT_FFMPEG_VERSION,
     INCLUDED_FFMPEG_VERSIONS,
     LIBAVFORMAT_VERSION_MAJOR,
@@ -21,6 +22,9 @@ from frigate.util.config import find_config_file
 sys.path.remove("/opt/frigate")
 
 yaml = YAML()
+HEADLESS_STATE_PATH = Path(
+    os.getenv("FRIGATE_HEADLESS_STATE_PATH", f"{CONFIG_DIR}/headless_state.json")
+)
 
 # Check if arbitrary exec sources are allowed (defaults to False for security)
 allow_arbitrary_exec = None
@@ -56,6 +60,35 @@ if os.path.isdir("/run/secrets"):
                 Path(os.path.join("/run/secrets", secret_file)).read_text().strip()
             )
 
+
+def _load_headless_go2rtc_streams() -> dict[str, Any]:
+    tenant_id = os.getenv("FRIGATE_TENANT_ID")
+    if not tenant_id or not HEADLESS_STATE_PATH.exists():
+        return {}
+
+    try:
+        payload = json.loads(HEADLESS_STATE_PATH.read_text())
+    except Exception:
+        return {}
+
+    overlays = payload.get("runtime_overlays")
+    if not isinstance(overlays, dict):
+        return {}
+
+    overlay = overlays.get(tenant_id)
+    if not isinstance(overlay, dict):
+        return {}
+
+    go2rtc_overlay = overlay.get("go2rtc")
+    if not isinstance(go2rtc_overlay, dict):
+        return {}
+
+    streams = go2rtc_overlay.get("streams")
+    if not isinstance(streams, dict):
+        return {}
+
+    return streams
+
 config_file = find_config_file()
 
 try:
@@ -70,6 +103,14 @@ except FileNotFoundError:
     config: dict[str, Any] = {}
 
 go2rtc_config: dict[str, Any] = config.get("go2rtc", {})
+headless_go2rtc_streams = _load_headless_go2rtc_streams()
+
+if headless_go2rtc_streams:
+    current_streams = go2rtc_config.get("streams")
+    if isinstance(current_streams, dict):
+        current_streams.update(headless_go2rtc_streams)
+    else:
+        go2rtc_config["streams"] = dict(headless_go2rtc_streams)
 
 # Need to enable CORS for go2rtc so the frigate integration / card work automatically
 if go2rtc_config.get("api") is None:
